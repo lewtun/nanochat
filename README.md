@@ -87,7 +87,7 @@ A few more notes:
 
 If you are a researcher and wish to help improve nanochat, two scripts of interest are [runs/scaling_laws.sh](runs/scaling_laws.sh) and [runs/miniseries.sh](runs/miniseries.sh). See [Jan 7 miniseries v1](https://github.com/karpathy/nanochat/discussions/420) for related documentation. For quick experimentation (~5 min pretraining runs) my favorite scale is to train a 12-layer model (GPT-1 sized), e.g. like this:
 
-The Hugging Face Jobs version of the scaling-laws pipeline uses two separate launchers. First, `bash runs/prepare_data_hf.sh` submits a detached `cpu-xl` Job that downloads 170 training shards plus the validation shard and trains the 32K tokenizer. By default, the private bucket `lewtun/nanochat-scaling-laws` stores the Parquet files under `base_data_climbmix/`, tokenizer assets under `tokenizer/`, and the completed inventory at `data_manifest.json`. The preparation Job is idempotent and will not delete incompatible or unexpected bucket contents.
+The Hugging Face Jobs version of the scaling-laws pipeline uses two separate launchers. First, `bash runs/prepare_data_hf.sh` submits a detached `cpu-xl` Job that downloads 170 training shards plus the validation shard and trains the 32K tokenizer. By default, the launcher gets the current Hub username from `hf auth whoami` and uses the private bucket `<hf-user>/nanochat-scaling-laws`. It stores the Parquet files under `base_data_climbmix/`, tokenizer assets under `tokenizer/`, and the completed inventory at `data_manifest.json`. The preparation Job is idempotent and will not delete incompatible or unexpected bucket contents.
 
 After preparation is complete, launch the production sweep with an explicit label:
 
@@ -95,9 +95,9 @@ After preparation is complete, launch the production sweep with an explicit labe
 RUN_LABEL=my-sweep bash runs/scaling_laws_hf.sh
 ```
 
-This submits one detached `h200x8` Job for all 24 points. Results, per-point logs, provenance, and state metadata are persisted under `scaling_laws/my-sweep/` in the same bucket. Trackio uses the private Space `lewtun/nanochat-scaling-laws` and the bucket mounted to that Space at `/data`. Before starting Trackio or distributed training, the Job stages all prepared Parquet shards and tokenizer files into ephemeral storage with retrying reads.
+This submits one detached `h200x8` Job for all 24 points. Results, per-point logs, provenance, and state metadata are persisted under `scaling_laws/my-sweep/` in the same bucket. Trackio uses the private Space `<hf-user>/nanochat-scaling-laws` and the bucket mounted to that Space at `/data`. Before starting Trackio or distributed training, the Job stages all prepared Parquet shards and tokenizer files into ephemeral storage with retrying reads.
 
-Both launchers accept `DRY_RUN=1` to print the fully escaped HF Jobs request without creating resources or submitting a Job. Override `HF_NAMESPACE`, `HF_BUCKET`, `GIT_REPO_URL`, or `GIT_REF` when needed; the selected Git commit must already be pushed.
+Both launchers accept `DRY_RUN=1` to print the fully escaped HF Jobs request without creating resources or submitting a Job. Override `HF_NAMESPACE`, `HF_BUCKET`, `TRACKIO_SPACE_ID`, `TRACKIO_BUCKET`, `GIT_REPO_URL`, or `GIT_REF` when needed. `GIT_REPO_URL` otherwise comes from the local `origin` remote, with GitHub SSH URLs converted to public HTTPS clone URLs. The selected Git commit must already be pushed.
 
 ```
 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \

@@ -3,9 +3,9 @@
 set -euo pipefail
 
 UV_VERSION="0.10.3"
-HF_NAMESPACE="${HF_NAMESPACE:-lewtun}"
-HF_BUCKET="${HF_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws}"
-GIT_REPO_URL="${GIT_REPO_URL:-https://github.com/lewtun/nanochat.git}"
+HF_NAMESPACE="${HF_NAMESPACE:-}"
+HF_BUCKET="${HF_BUCKET:-}"
+GIT_REPO_URL="${GIT_REPO_URL:-}"
 GIT_REF="${GIT_REF:-}"
 NUM_SHARDS="${NUM_SHARDS:-170}"
 PREP_FLAVOR="${PREP_FLAVOR:-cpu-xl}"
@@ -62,6 +62,46 @@ hf_cli() {
     uv run --frozen hf "$@"
 }
 
+resolve_hf_namespace() {
+    local namespace
+    if ! namespace="$(hf_cli auth whoami --quiet)" || [[ -z "$namespace" ]]; then
+        die "Unable to determine the logged-in Hugging Face user; run 'uv run --frozen hf auth login' or set HF_NAMESPACE"
+    fi
+    printf '%s\n' "$namespace"
+}
+
+resolve_git_repo_url() {
+    local root url
+    root="$(repo_root)"
+    if ! url="$(git -C "$root" remote get-url origin 2>/dev/null)"; then
+        die "Unable to determine GIT_REPO_URL from the origin remote; set GIT_REPO_URL"
+    fi
+    case "$url" in
+        git@github.com:*)
+            printf 'https://github.com/%s\n' "${url#git@github.com:}"
+            ;;
+        ssh://git@github.com/*)
+            printf 'https://github.com/%s\n' "${url#ssh://git@github.com/}"
+            ;;
+        http://*|https://*)
+            printf '%s\n' "$url"
+            ;;
+        *)
+            die "Cannot derive a public clone URL from origin '$url'; set GIT_REPO_URL"
+            ;;
+    esac
+}
+
+resolve_launcher_defaults() {
+    if [[ -z "$HF_NAMESPACE" ]]; then
+        HF_NAMESPACE="$(resolve_hf_namespace)"
+    fi
+    HF_BUCKET="${HF_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws}"
+    if [[ -z "$GIT_REPO_URL" ]]; then
+        GIT_REPO_URL="$(resolve_git_repo_url)"
+    fi
+}
+
 run_python() {
     if command -v python >/dev/null 2>&1; then
         command python "$@"
@@ -75,6 +115,7 @@ parse_job_id() {
 }
 
 validate_settings() {
+    [[ -n "$HF_NAMESPACE" && "$HF_NAMESPACE" != */* && "$HF_NAMESPACE" != *[[:space:]]* ]] || die "HF_NAMESPACE must be a single Hub namespace"
     [[ "$NUM_SHARDS" =~ ^[1-9][0-9]*$ ]] || die "NUM_SHARDS must be a positive integer"
     (( NUM_SHARDS <= 6542 )) || die "NUM_SHARDS must not exceed 6542"
     [[ "$HF_BUCKET" == */* ]] || die "HF_BUCKET must be namespace/name"
@@ -247,9 +288,10 @@ PY
 launcher_main() {
     local git_sha short_sha job_name remote_command submit_output job_id
     local -a request
-    validate_settings
     command -v git >/dev/null 2>&1 || die "git is required"
     command -v uv >/dev/null 2>&1 || die "uv is required"
+    resolve_launcher_defaults
+    validate_settings
     git_sha="$(resolve_git_sha)"
     short_sha="${git_sha:0:8}"
     job_name="nanochat-prepare-data-${short_sha}"
@@ -267,6 +309,8 @@ launcher_main() {
         --env "UV_VERSION=$UV_VERSION"
         --env "GIT_REPO_URL=$GIT_REPO_URL"
         --env "GIT_SHA=$git_sha"
+        --env "HF_NAMESPACE=$HF_NAMESPACE"
+        --env "HF_BUCKET=$HF_BUCKET"
         --env "NUM_SHARDS=$NUM_SHARDS"
         --env "NANOCHAT_MOUNT=$NANOCHAT_MOUNT"
         --volume "hf://buckets/${HF_BUCKET}:${NANOCHAT_MOUNT}:rw"

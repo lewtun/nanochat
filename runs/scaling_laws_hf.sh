@@ -3,13 +3,13 @@
 set -euo pipefail
 
 UV_VERSION="0.10.3"
-HF_NAMESPACE="${HF_NAMESPACE:-lewtun}"
-HF_BUCKET="${HF_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws}"
-GIT_REPO_URL="${GIT_REPO_URL:-https://github.com/lewtun/nanochat.git}"
+HF_NAMESPACE="${HF_NAMESPACE:-}"
+HF_BUCKET="${HF_BUCKET:-}"
+GIT_REPO_URL="${GIT_REPO_URL:-}"
 GIT_REF="${GIT_REF:-}"
 RUN_LABEL="${RUN_LABEL:-}"
-TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-${HF_NAMESPACE}/nanochat-scaling-laws}"
-TRACKIO_BUCKET="${TRACKIO_BUCKET:-$HF_BUCKET}"
+TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-}"
+TRACKIO_BUCKET="${TRACKIO_BUCKET:-}"
 TRAIN_IMAGE="${TRAIN_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}"
 TRAIN_FLAVOR="h200x8"
 NPROC_PER_NODE=8
@@ -65,6 +65,48 @@ hf_cli() {
     uv run --frozen hf "$@"
 }
 
+resolve_hf_namespace() {
+    local namespace
+    if ! namespace="$(hf_cli auth whoami --quiet)" || [[ -z "$namespace" ]]; then
+        die "Unable to determine the logged-in Hugging Face user; run 'uv run --frozen hf auth login' or set HF_NAMESPACE"
+    fi
+    printf '%s\n' "$namespace"
+}
+
+resolve_git_repo_url() {
+    local root url
+    root="$(repo_root)"
+    if ! url="$(git -C "$root" remote get-url origin 2>/dev/null)"; then
+        die "Unable to determine GIT_REPO_URL from the origin remote; set GIT_REPO_URL"
+    fi
+    case "$url" in
+        git@github.com:*)
+            printf 'https://github.com/%s\n' "${url#git@github.com:}"
+            ;;
+        ssh://git@github.com/*)
+            printf 'https://github.com/%s\n' "${url#ssh://git@github.com/}"
+            ;;
+        http://*|https://*)
+            printf '%s\n' "$url"
+            ;;
+        *)
+            die "Cannot derive a public clone URL from origin '$url'; set GIT_REPO_URL"
+            ;;
+    esac
+}
+
+resolve_launcher_defaults() {
+    if [[ -z "$HF_NAMESPACE" ]]; then
+        HF_NAMESPACE="$(resolve_hf_namespace)"
+    fi
+    HF_BUCKET="${HF_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws}"
+    TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-${HF_NAMESPACE}/nanochat-scaling-laws}"
+    TRACKIO_BUCKET="${TRACKIO_BUCKET:-$HF_BUCKET}"
+    if [[ -z "$GIT_REPO_URL" ]]; then
+        GIT_REPO_URL="$(resolve_git_repo_url)"
+    fi
+}
+
 run_python() {
     if command -v python >/dev/null 2>&1; then
         command python "$@"
@@ -86,6 +128,7 @@ print_command() {
 validate_settings() {
     [[ -n "$RUN_LABEL" ]] || die "RUN_LABEL is required"
     [[ "$RUN_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "RUN_LABEL may contain only letters, numbers, dot, underscore, and hyphen"
+    [[ -n "$HF_NAMESPACE" && "$HF_NAMESPACE" != */* && "$HF_NAMESPACE" != *[[:space:]]* ]] || die "HF_NAMESPACE must be a single Hub namespace"
     [[ "$HF_BUCKET" == */* ]] || die "HF_BUCKET must be namespace/name"
     [[ "$TRACKIO_BUCKET" == */* ]] || die "TRACKIO_BUCKET must be namespace/name"
     [[ "$TRACKIO_SPACE_ID" == */* ]] || die "TRACKIO_SPACE_ID must be namespace/name"
@@ -560,6 +603,7 @@ launcher_main() {
     local -a request
     command -v git >/dev/null 2>&1 || die "git is required"
     command -v uv >/dev/null 2>&1 || die "uv is required"
+    resolve_launcher_defaults
     git_sha="$(resolve_git_sha)"
     validate_settings
     job_name="nanochat-scaling-${RUN_LABEL}"
