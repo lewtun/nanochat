@@ -62,6 +62,14 @@ hf_cli() {
     uv run --frozen hf "$@"
 }
 
+run_python() {
+    if command -v python >/dev/null 2>&1; then
+        command python "$@"
+    else
+        uv run --frozen python "$@"
+    fi
+}
+
 validate_settings() {
     [[ "$NUM_SHARDS" =~ ^[1-9][0-9]*$ ]] || die "NUM_SHARDS must be a positive integer"
     (( NUM_SHARDS <= 6542 )) || die "NUM_SHARDS must not exceed 6542"
@@ -89,7 +97,7 @@ EOF
 }
 
 manifest_is_compatible() {
-    python - "$NANOCHAT_MOUNT/data_manifest.json" "$NUM_SHARDS" <<'PY'
+    run_python - "$NANOCHAT_MOUNT/data_manifest.json" "$NUM_SHARDS" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -117,7 +125,7 @@ PY
 
 validate_assets() {
     local write_manifest="${1:-0}"
-    python - "$NANOCHAT_MOUNT" "$NUM_SHARDS" "$write_manifest" <<'PY'
+    run_python - "$NANOCHAT_MOUNT" "$NUM_SHARDS" "$write_manifest" <<'PY'
 import datetime as dt
 import json
 import os
@@ -210,7 +218,7 @@ worker_main() {
         return
     fi
 
-    python - "$NANOCHAT_MOUNT/base_data_climbmix" "$NUM_SHARDS" <<'PY'
+    run_python - "$NANOCHAT_MOUNT/base_data_climbmix" "$NUM_SHARDS" <<'PY'
 import sys
 from pathlib import Path
 
@@ -226,9 +234,9 @@ if unexpected:
 PY
 
     log "Downloading $NUM_SHARDS training shards plus validation shard 06542"
-    python -m nanochat.dataset --num-files "$NUM_SHARDS" --num-workers "${PREP_WORKERS:-16}"
+    run_python -m nanochat.dataset --num-files "$NUM_SHARDS" --num-workers "${PREP_WORKERS:-16}"
     log "Training the 32K tokenizer on 2B characters"
-    python -m scripts.tok_train --max-chars 2000000000 --vocab-size 32768
+    run_python -m scripts.tok_train --max-chars 2000000000 --vocab-size 32768
     validate_assets 1
 }
 
@@ -270,7 +278,7 @@ launcher_main() {
     assert_pushed_sha "$git_sha"
     hf_cli auth whoami >/dev/null
     hf_cli buckets create "$HF_BUCKET" --private --exist-ok >/dev/null
-    hf_cli buckets info "$HF_BUCKET" --format json | python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "bucket must be private"'
+    hf_cli buckets info "$HF_BUCKET" --format json | run_python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "bucket must be private"'
 
     if [[ "$(hf_cli jobs ps --namespace "$HF_NAMESPACE" --label pipeline=nanochat-data-prep --label "git_sha=$git_sha" --format json)" != "[]" ]]; then
         die "A preparation Job for $git_sha is already scheduling or running"

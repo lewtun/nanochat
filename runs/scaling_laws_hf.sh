@@ -64,6 +64,14 @@ hf_cli() {
     uv run --frozen hf "$@"
 }
 
+run_python() {
+    if command -v python >/dev/null 2>&1; then
+        command python "$@"
+    else
+        uv run --frozen python "$@"
+    fi
+}
+
 print_command() {
     printf 'Request: '
     printf '%q ' "$@"
@@ -120,7 +128,7 @@ EOF
 }
 
 validate_data_manifest_stream() {
-    python -c '
+    run_python -c '
 import json, sys
 manifest = json.load(sys.stdin)
 expected = {
@@ -168,9 +176,9 @@ PY
 
 verify_private_resources() {
     local space_id="$1" bucket_id="$2"
-    hf_cli buckets info "$bucket_id" --format json | python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "Trackio bucket must be private"'
-    hf_cli spaces info "$space_id" --format json | python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "Trackio Space must be private"; files={x["rfilename"] for x in info.get("siblings", [])}; assert "ui/main.py" in files, "Trackio UI is missing"'
-    hf_cli spaces volumes list "$space_id" --format json | python -c '
+    hf_cli buckets info "$bucket_id" --format json | run_python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "Trackio bucket must be private"'
+    hf_cli spaces info "$space_id" --format json | run_python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "Trackio Space must be private"; files={x["rfilename"] for x in info.get("siblings", [])}; assert "ui/main.py" in files, "Trackio UI is missing"'
+    hf_cli spaces volumes list "$space_id" --format json | run_python -c '
 import json, sys
 payload = json.load(sys.stdin)
 text = json.dumps(payload)
@@ -181,7 +189,7 @@ assert bucket in text and mount in text, f"Expected {bucket} mounted at {mount}:
 
 parse_training_log() {
     local log_file="$1" flops_budget="$2" depth="$3" run_name="$4" train_time="$5"
-    python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" <<'PY'
+    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" <<'PY'
 import csv
 import math
 import re
@@ -249,7 +257,7 @@ PY
 
 write_status() {
     local state="$1" exit_code="${2:-0}"
-    python - "$RESULTS_DIR" "$state" "$exit_code" <<'PY'
+    run_python - "$RESULTS_DIR" "$state" "$exit_code" <<'PY'
 import datetime as dt
 import json
 import os
@@ -282,7 +290,7 @@ PY
 }
 
 write_provenance() {
-    python - "$RESULTS_DIR/provenance.json" <<'PY'
+    run_python - "$RESULTS_DIR/provenance.json" <<'PY'
 import datetime as dt
 import json
 import os
@@ -317,7 +325,7 @@ PY
 
 point_exists() {
     local results_file="$1" flops_budget="$2" depth="$3"
-    python - "$results_file" "$flops_budget" "$depth" <<'PY'
+    run_python - "$results_file" "$flops_budget" "$depth" <<'PY'
 import csv
 import sys
 
@@ -345,7 +353,7 @@ acquire_writer_lock() {
         if ! inspect_json="$(hf_cli jobs inspect "$previous_job" --namespace "$HF_NAMESPACE" --format json 2>/dev/null)"; then
             die "Cannot verify previous writer $previous_job; refusing concurrent access"
         fi
-        if printf '%s' "$inspect_json" | python -c '
+        if printf '%s' "$inspect_json" | run_python -c '
 import json, sys
 payload = json.load(sys.stdin)
 text = json.dumps(payload).upper()
@@ -369,7 +377,7 @@ release_writer_lock() {
 
 cleanup_checkpoint() {
     local checkpoint_dir="$1" runtime_base="$2"
-    python - "$checkpoint_dir" "$runtime_base" <<'PY'
+    run_python - "$checkpoint_dir" "$runtime_base" <<'PY'
 import shutil
 import sys
 from pathlib import Path
@@ -460,7 +468,7 @@ worker_main() {
     [[ "$(git rev-parse HEAD)" == "$GIT_SHA" ]] || die "Worker checkout does not match GIT_SHA"
     log "HF accelerator metadata: ${ACCELERATOR:-unset}; requested flavor: $TRAIN_FLAVOR"
 
-    python - <<'PY'
+    run_python - <<'PY'
 import torch
 
 count = torch.cuda.device_count()
@@ -507,7 +515,7 @@ PY
         done
     done
 
-    row_count="$(python - "$RESULTS_FILE" <<'PY'
+    row_count="$(run_python - "$RESULTS_FILE" <<'PY'
 import csv
 import sys
 with open(sys.argv[1], newline="") as handle:
