@@ -241,16 +241,20 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     return is_correct
 
 
-def evaluate_task(model, tokenizer, data, device, task_meta):
+def evaluate_task(model, tokenizer, data, device, task_meta, max_examples=-1):
     """
     This function is responsible for evaluating one task across many examples.
     It also handles dispatch to all processes if the script is run with torchrun.
+
+    ``max_examples`` limits the scored examples without shrinking ``data``, which
+    remains the sampling pool for few-shot prompts.
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    correct = torch.zeros(len(data), dtype=torch.float32, device=device)
+    num_examples = min(max_examples, len(data)) if max_examples > 0 else len(data)
+    correct = torch.zeros(num_examples, dtype=torch.float32, device=device)
     # stride the examples to each rank
-    for idx in range(rank, len(data), world_size):
+    for idx in range(rank, num_examples, world_size):
         is_correct = evaluate_example(idx, model, tokenizer, data, device, task_meta)
         correct[idx] = float(is_correct)
     # sync results across all the processes if running distributed

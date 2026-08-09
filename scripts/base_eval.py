@@ -100,13 +100,14 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
         with open(data_path, 'r', encoding='utf-8') as f:
             data = [json.loads(line.strip()) for line in f]
 
-        # Shuffle for consistent subsampling when using max_per_task
+        # Shuffle for consistent target selection when using max_per_task. Keep
+        # the full task available as the pool of few-shot examples.
         shuffle_rng = random.Random(1337)
         shuffle_rng.shuffle(data)
-        if max_per_task > 0:
-            data = data[:max_per_task]
 
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
+        accuracy = evaluate_task(
+            model, tokenizer, data, device, task_meta, max_examples=max_per_task
+        )
         results[label] = accuracy
         random_baseline = random_baselines[label]
         centered_result = (accuracy - 0.01 * random_baseline) / (1.0 - 0.01 * random_baseline)
