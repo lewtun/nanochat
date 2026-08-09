@@ -16,6 +16,22 @@ NPROC_PER_NODE=8
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 
+FLOPS_BUDGETS=(
+    1e18
+    2.15e18
+    4.64e18
+    1e19
+)
+
+DEPTHS=(
+    10
+    12
+    14
+    16
+    18
+    20
+)
+
 RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,num_iterations,tokens_trained,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
 log() {
@@ -127,6 +143,42 @@ validate_settings() {
     [[ "$TRACKIO_SPACE_ID" == */* ]] || die "TRACKIO_SPACE_ID must be namespace/name"
     [[ "$TRAIN_FLAVOR" == "h200x8" && "$NPROC_PER_NODE" == "8" ]] || die "Scaling requires h200x8 with eight processes"
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
+    run_python - "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
+import re
+import sys
+from decimal import Decimal, InvalidOperation
+
+budget_count = int(sys.argv[1])
+budgets = sys.argv[2 : 2 + budget_count]
+depths = sys.argv[2 + budget_count :]
+
+if not budgets:
+    raise SystemExit("FLOPS_BUDGETS must not be empty")
+if not depths:
+    raise SystemExit("DEPTHS must not be empty")
+
+parsed_budgets = []
+for text in budgets:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?", text):
+        raise SystemExit(f"Invalid FLOPS_BUDGETS value: {text!r}")
+    try:
+        value = Decimal(text)
+    except InvalidOperation as error:
+        raise SystemExit(f"Invalid FLOPS_BUDGETS value: {text!r}") from error
+    if not value.is_finite() or value <= 0:
+        raise SystemExit(f"FLOPS_BUDGETS values must be finite and positive: {text!r}")
+    parsed_budgets.append(value)
+if len(set(parsed_budgets)) != len(parsed_budgets):
+    raise SystemExit("FLOPS_BUDGETS must not contain duplicates")
+
+parsed_depths = []
+for text in depths:
+    if not text.isdigit() or text != str(int(text)) or int(text) <= 0:
+        raise SystemExit(f"DEPTHS values must be positive integers: {text!r}")
+    parsed_depths.append(int(text))
+if len(set(parsed_depths)) != len(parsed_depths):
+    raise SystemExit("DEPTHS must not contain duplicates")
+PY
 }
 
 remote_bootstrap_command() {
@@ -311,14 +363,18 @@ PY
 }
 
 write_provenance() {
-    run_python - "$RESULTS_DIR/provenance.json" <<'PY'
+    run_python - "$RESULTS_DIR/provenance.json" "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
 import datetime as dt
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
-target = Path(__import__("sys").argv[1])
+target = Path(sys.argv[1])
+budget_count = int(sys.argv[2])
+flops_budgets = sys.argv[3 : 3 + budget_count]
+depths = [int(value) for value in sys.argv[3 + budget_count :]]
 payload = {
     "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     "git_sha": os.environ["GIT_SHA"],
@@ -332,6 +388,9 @@ payload = {
     "trackio_space_id": os.environ["TRACKIO_SPACE_ID"],
     "trackio_bucket": os.environ["TRACKIO_BUCKET"],
     "nproc_per_node": int(os.environ["NPROC_PER_NODE"]),
+    "flops_budgets": flops_budgets,
+    "depths": depths,
+    "sweep_size": len(flops_budgets) * len(depths),
 }
 with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=".provenance.", suffix=".tmp", delete=False) as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
@@ -526,8 +585,7 @@ run_point() {
 }
 
 worker_main() {
-    local runtime_base data_manifest_path row_count exit_code
-    local -a flops_budgets depths
+    local runtime_base data_manifest_path row_count expected_rows exit_code
     validate_settings
     [[ -d "$NANOCHAT_MOUNT" ]] || die "Bucket is not mounted at $NANOCHAT_MOUNT"
     [[ -n "${GIT_SHA:-}" ]] || die "GIT_SHA is required in worker mode"
@@ -568,11 +626,8 @@ PY
     mkdir -p "$runtime_base/base_checkpoints"
     stage_training_assets "$runtime_base"
 
-    flops_budgets=(1e18 2.15e18 4.64e18 1e19)
-    depths=(10 12 14 16 18 20)
-
-    for flops_budget in "${flops_budgets[@]}"; do
-        for depth in "${depths[@]}"; do
+    for flops_budget in "${FLOPS_BUDGETS[@]}"; do
+        for depth in "${DEPTHS[@]}"; do
             run_point "$flops_budget" "$depth" "$runtime_base"
         done
     done
@@ -584,7 +639,8 @@ with open(sys.argv[1], newline="") as handle:
     print(sum(1 for _ in csv.DictReader(handle)))
 PY
 )"
-    [[ "$row_count" -eq 24 ]] || die "Expected 24 result rows, found $row_count"
+    expected_rows=$((${#FLOPS_BUDGETS[@]} * ${#DEPTHS[@]}))
+    [[ "$row_count" -eq "$expected_rows" ]] || die "Expected $expected_rows result rows, found $row_count"
     write_status COMPLETE
     release_writer_lock
     trap - EXIT

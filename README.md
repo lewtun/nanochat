@@ -95,7 +95,9 @@ After preparation is complete, launch the production sweep with an explicit labe
 RUN_LABEL=my-sweep bash runs/scaling_laws_hf.sh
 ```
 
-This submits one detached `h200x8` Job for all 24 points. Results, per-point logs, provenance, and state metadata are persisted under `scaling_laws/my-sweep/` in the same bucket. Trackio uses the private Space `<hf-user>/nanochat-scaling-laws` and the bucket mounted to that Space at `/data`. Before starting Trackio or distributed training, the Job stages all prepared Parquet shards and tokenizer files into ephemeral storage with retrying reads.
+This submits one detached `h200x8` Job for the default 24-point sweep. Results, per-point logs, provenance, and state metadata are persisted under `scaling_laws/my-sweep/` in the same bucket. Trackio uses the private Space `<hf-user>/nanochat-scaling-laws` and the bucket mounted to that Space at `/data`. Before starting Trackio or distributed training, the Job stages all prepared Parquet shards and tokenizer files into ephemeral storage with retrying reads.
+
+To change the sweep, edit the top-level `FLOPS_BUDGETS` and `DEPTHS` arrays in `runs/scaling_laws_hf.sh`, then commit and push the change before launching. The exact arrays are recorded in each run's `provenance.json`.
 
 Override `HF_NAMESPACE`, `HF_BUCKET`, `TRACKIO_SPACE_ID`, `TRACKIO_BUCKET`, `GIT_REPO_URL`, or `GIT_REF` when needed. `GIT_REPO_URL` otherwise comes from the local `origin` remote, with GitHub SSH URLs converted to public HTTPS clone URLs. The selected Git commit must already be pushed.
 
