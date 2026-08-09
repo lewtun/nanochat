@@ -97,13 +97,11 @@ OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train
     --save-every=-1 \
 ```
 
-This uses wandb (run name "d12"), only runs the CORE metric on last step, and it doesn't sample and save intermediate checkpoints. I like to change something in the code, re-run a d12 (or a d16 etc) and see if it helped, in an iteration loop. To see if a run helps, I like to monitor the wandb plots for:
+This logs a local Trackio run named "d12", only runs the CORE metric on the last step, and doesn't sample or save intermediate checkpoints. Launch the dashboard with `trackio show --project nanochat`. To share runs remotely, set `TRACKIO_SPACE_ID` to a Hugging Face Space ID before training; Trackio will create or reuse the Space. I like to change something in the code, re-run a d12 (or a d16 etc), and see if it helped in an iteration loop. To evaluate a run, I monitor these Trackio plots:
 
 1. `val_bpb` (validation loss in vocab-size-invariant units of bits per byte) as a function of `step`, `total_training_time` and `total_training_flops`.
 2. `core_metric` (the DCLM CORE score)
 3. VRAM utilization, `train/mfu` (Model FLOPS utilization), `train/tok_per_sec` (training throughput)
-
-See an example [here](https://github.com/karpathy/nanochat/pull/498#issuecomment-3850720044).
 
 The important thing to note is that nanochat is written and configured around one single dial of complexity - the depth of the transformer. This single integer automatically determines all other hyperparameters (the width of the transformer, number of heads, learning rate adjustments, training horizons, weight decays, ...) so that the trained model comes out compute optimal. The idea is that the user doesn't have to think about or set any of this, they are simply asking for a smaller or bigger model using `--depth`, and everything "just works". By sweeping out the depth, you achieve the nanochat miniseries of compute optimal models at various sizes. GPT-2 capability model (which is of most interest at the moment) happens to be somewhere around d24-d26 range with the current code. But any candidate changes to the repo have to be principled enough that they work for all settings of depth.
 

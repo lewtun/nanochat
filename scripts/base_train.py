@@ -21,13 +21,13 @@ import argparse
 from dataclasses import asdict
 from contextlib import contextmanager
 
-import wandb
+import trackio
 import torch
 import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
+from nanochat.common import compute_init, compute_cleanup, print0, DummyTracker, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
@@ -40,7 +40,7 @@ print_banner()
 # CLI arguments
 parser = argparse.ArgumentParser(description="Pretrain base model")
 # Logging
-parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--run", type=str, default="dummy", help="Trackio run name ('dummy' disables experiment tracking)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
@@ -80,7 +80,7 @@ parser.add_argument("--model-tag", type=str, default=None, help="override model 
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
-# Compute init and wandb logging
+# Compute init and experiment tracking
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
@@ -95,9 +95,9 @@ else:
     gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
-# wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
+# Trackio logging init
+use_dummy_tracker = args.run == "dummy" or not master_process
+tracker = DummyTracker() if use_dummy_tracker else trackio.init(project="nanochat", name=args.run, config=user_config)
 
 # Flash Attention status
 from nanochat.flash_attention import USE_FA3
@@ -427,12 +427,11 @@ while True:
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
-        wandb_run.log({
-            "step": step,
+        tracker.log({
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
-        })
+        }, step=step)
         model.train()
 
     # once in a while: estimate the CORE metric (all ranks participate)
@@ -444,12 +443,11 @@ while True:
         with disable_fp8(orig_model):
             results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
         print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
-        wandb_run.log({
-            "step": step,
+        tracker.log({
             "total_training_flops": flops_so_far,
             "core_metric": results["core_metric"],
             "centered_results": results["centered_results"],
-        })
+        }, step=step)
         model.train()
 
     # once in a while: sample from the model (only on master process)
@@ -567,7 +565,6 @@ while True:
     print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
     if step % 100 == 0:
         log_data = {
-            "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
@@ -577,7 +574,7 @@ while True:
             "train/mfu": mfu,
             "train/epoch": epoch,
         }
-        wandb_run.log(log_data)
+        tracker.log(log_data, step=step)
 
     # state update
     first_step_of_run = (step == 0) or (resuming and step == args.resume_from_step)
@@ -600,5 +597,5 @@ if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
 
 # cleanup
-wandb_run.finish() # wandb run finish
+tracker.finish()
 compute_cleanup()

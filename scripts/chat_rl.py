@@ -19,10 +19,10 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
 import argparse
 import os
 import itertools
-import wandb
+import trackio
 import torch
 import torch.distributed as dist
-from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb, autodetect_device_type
+from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyTracker, autodetect_device_type
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
@@ -31,7 +31,7 @@ from tasks.gsm8k import GSM8K
 # CLI arguments
 parser = argparse.ArgumentParser(description="Reinforcement learning on GSM8K")
 # Logging
-parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--run", type=str, default="dummy", help="Trackio run name ('dummy' disables experiment tracking)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # Model loading
@@ -66,9 +66,9 @@ device_type = autodetect_device_type() if args.device_type == "" else args.devic
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 
-# wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=args.run, config=user_config)
+# Trackio logging init
+use_dummy_tracker = args.run == "dummy" or not master_process
+tracker = DummyTracker() if use_dummy_tracker else trackio.init(project="nanochat-rl", name=args.run, config=user_config)
 
 # Init model and tokenizer
 model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag=args.model_tag, step=args.model_step)
@@ -221,7 +221,7 @@ print0(f"Calculated examples per rank: {examples_per_rank}")
 batch_iterator = get_batch()
 for step in range(num_steps):
 
-    # Evaluate the model once in a while and log to wandb
+    # Evaluate the model once in a while and log the results
     if step % args.eval_every == 0:
         model.eval()
         passk = torch.zeros(args.device_batch_size, device=device) # pass@k for k=1..device_batch_size
@@ -237,10 +237,9 @@ for step in range(num_steps):
         print_passk = [f"Pass@{k}: {passk[k - 1].item():.4f}" for k in range(1, args.device_batch_size + 1)]
         print0(f"Step {step} | {', '.join(print_passk)}")
         log_passk = {f"pass@{k}": passk[k - 1].item() for k in range(1, args.device_batch_size + 1)}
-        wandb_run.log({
-            "step": step,
+        tracker.log({
             **log_passk,
-        })
+        }, step=step)
 
     # Forward/Backward on rollouts over multiple examples in the dataset
     rewards_list = []
@@ -287,11 +286,10 @@ for step in range(num_steps):
         mean_reward = mean_reward_tensor.item()
         mean_sequence_length = mean_sequence_length_tensor.item()
     print0(f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f}")
-    wandb_run.log({
-        "step": step,
+    tracker.log({
         "reward": mean_reward,
         "sequence_length": mean_sequence_length,
-    })
+    }, step=step)
 
     # Update the model parameters
     lrm = get_lr_multiplier(step)
@@ -299,10 +297,9 @@ for step in range(num_steps):
         group["lr"] = group["initial_lr"] * lrm
     optimizer.step()
     model.zero_grad(set_to_none=True)
-    wandb_run.log({
-        "step": step,
+    tracker.log({
         "lrm": lrm,
-    })
+    }, step=step)
 
     # Master process saves the model once in a while. Skip first step. Save last step.
     if master_process and ((step > 0 and step % args.save_every == 0) or step == num_steps - 1):
@@ -322,5 +319,5 @@ for step in range(num_steps):
         )
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
-wandb_run.finish() # wandb run finish
+tracker.finish()
 compute_cleanup()
