@@ -105,6 +105,22 @@ def test_smoke_dry_run_contract():
     assert "--env HF_BUCKET=lewtun/nanochat-scaling-laws" in request
 
 
+def test_two_h200_debug_dry_run_contract():
+    result = run_script(
+        SCALING_SCRIPT,
+        env={
+            "DRY_RUN": "1",
+            "SMOKE_TEST": "1",
+            "DEBUG_H200X2": "1",
+            "RUN_LABEL": "pytest-debug2",
+        },
+    )
+    request = result.stdout
+    assert "--flavor h200x2" in request
+    assert "--label debug_h200x2=1" in request
+    assert "--env NPROC_PER_NODE=2" in request
+
+
 def test_production_requires_run_label():
     result = run_script(
         SCALING_SCRIPT,

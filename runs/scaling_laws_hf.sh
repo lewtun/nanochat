@@ -9,10 +9,12 @@ GIT_REPO_URL="${GIT_REPO_URL:-https://github.com/lewtun/nanochat.git}"
 GIT_REF="${GIT_REF:-}"
 RUN_LABEL="${RUN_LABEL:-}"
 SMOKE_TEST="${SMOKE_TEST:-0}"
+DEBUG_H200X2="${DEBUG_H200X2:-0}"
 TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-}"
 TRACKIO_BUCKET="${TRACKIO_BUCKET:-}"
 TRAIN_IMAGE="${TRAIN_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}"
-TRAIN_FLAVOR="h200x8"
+TRAIN_FLAVOR="${TRAIN_FLAVOR:-h200x8}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -35,6 +37,7 @@ Usage: RUN_LABEL=<label> bash runs/scaling_laws_hf.sh [--worker]
 The default mode submits one detached h200x8 Job for the complete 24-point
 sweep. Set SMOKE_TEST=1 to submit one two-iteration d10 acceptance run; when
 RUN_LABEL is omitted in smoke mode, a unique label is generated automatically.
+Set DEBUG_H200X2=1 together with SMOKE_TEST=1 for the two-H200 debug rung.
 
 --worker is reserved for the remote Job.
 EOF
@@ -81,10 +84,23 @@ print_command() {
 configure_mode() {
     local git_sha="${1:-}"
     [[ "$SMOKE_TEST" == "0" || "$SMOKE_TEST" == "1" ]] || die "SMOKE_TEST must be 0 or 1"
+    [[ "$DEBUG_H200X2" == "0" || "$DEBUG_H200X2" == "1" ]] || die "DEBUG_H200X2 must be 0 or 1"
+    if [[ "$DEBUG_H200X2" == "1" ]]; then
+        [[ "$SMOKE_TEST" == "1" ]] || die "DEBUG_H200X2 requires SMOKE_TEST=1"
+        TRAIN_FLAVOR="h200x2"
+        NPROC_PER_NODE=2
+    else
+        TRAIN_FLAVOR="h200x8"
+        NPROC_PER_NODE=8
+    fi
     if [[ "$SMOKE_TEST" == "1" ]]; then
         if [[ -z "$RUN_LABEL" ]]; then
-            [[ -n "$git_sha" ]] || die "A Git SHA is needed to generate the smoke label"
-            RUN_LABEL="smoke-$(date -u '+%Y%m%dT%H%M%SZ')-${git_sha:0:8}"
+            [[ -n "$git_sha" ]] || die "A Git SHA is needed to generate the test label"
+            if [[ "$DEBUG_H200X2" == "1" ]]; then
+                RUN_LABEL="debug2-$(date -u '+%Y%m%dT%H%M%SZ')-${git_sha:0:8}"
+            else
+                RUN_LABEL="smoke-$(date -u '+%Y%m%dT%H%M%SZ')-${git_sha:0:8}"
+            fi
         fi
         TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-${HF_NAMESPACE}/nanochat-scaling-laws-smoke}"
         TRACKIO_BUCKET="${TRACKIO_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws-smoke}"
@@ -104,7 +120,11 @@ validate_settings() {
     [[ "$HF_BUCKET" == */* ]] || die "HF_BUCKET must be namespace/name"
     [[ "$TRACKIO_BUCKET" == */* ]] || die "TRACKIO_BUCKET must be namespace/name"
     [[ "$TRACKIO_SPACE_ID" == */* ]] || die "TRACKIO_SPACE_ID must be namespace/name"
-    [[ "$TRAIN_FLAVOR" == "h200x8" ]] || die "TRAIN_FLAVOR is fixed to h200x8"
+    if [[ "$DEBUG_H200X2" == "1" ]]; then
+        [[ "$TRAIN_FLAVOR" == "h200x2" && "$NPROC_PER_NODE" == "2" ]] || die "Debug mode requires h200x2 with two processes"
+    else
+        [[ "$TRAIN_FLAVOR" == "h200x8" && "$NPROC_PER_NODE" == "8" ]] || die "Production and final smoke modes require h200x8 with eight processes"
+    fi
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
 }
 
@@ -277,6 +297,7 @@ payload = {
     "git_sha": os.environ["GIT_SHA"],
     "run_label": os.environ["RUN_LABEL"],
     "smoke_test": os.environ["SMOKE_TEST"] == "1",
+    "debug_h200x2": os.environ["DEBUG_H200X2"] == "1",
 }
 with tempfile.NamedTemporaryFile("w", dir=directory, prefix=f".{state}.", suffix=".tmp", delete=False) as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
@@ -306,13 +327,14 @@ payload = {
     "job_id": os.environ.get("JOB_ID", "unknown"),
     "run_label": os.environ["RUN_LABEL"],
     "smoke_test": os.environ["SMOKE_TEST"] == "1",
+    "debug_h200x2": os.environ["DEBUG_H200X2"] == "1",
     "hardware": os.environ["TRAIN_FLAVOR"],
     "image": os.environ["TRAIN_IMAGE"],
     "data_bucket": os.environ["HF_BUCKET"],
     "data_manifest_git_sha": os.environ.get("DATA_MANIFEST_GIT_SHA", "unknown"),
     "trackio_space_id": os.environ["TRACKIO_SPACE_ID"],
     "trackio_bucket": os.environ["TRACKIO_BUCKET"],
-    "nproc_per_node": 8,
+    "nproc_per_node": int(os.environ["NPROC_PER_NODE"]),
 }
 with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=".provenance.", suffix=".tmp", delete=False) as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
@@ -392,6 +414,68 @@ shutil.rmtree(checkpoint, ignore_errors=True)
 PY
 }
 
+stage_training_assets() {
+    local runtime_base="$1"
+    log "Staging training assets from the mounted bucket into local Job storage"
+    run_python - "$NANOCHAT_MOUNT" "$runtime_base" "$SMOKE_TEST" <<'PY'
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+import pyarrow.parquet as pq
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+smoke_test = sys.argv[3] == "1"
+if smoke_test:
+    shard_names = ["shard_00000.parquet", "shard_06542.parquet"]
+else:
+    shard_names = [f"shard_{index:05d}.parquet" for index in range(170)] + ["shard_06542.parquet"]
+
+def copy_with_retries(source_path, target_path, attempts=5):
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target_path.with_name(f".{target_path.name}.partial")
+    for attempt in range(1, attempts + 1):
+        try:
+            temporary.unlink(missing_ok=True)
+            with source_path.open("rb") as source_handle, temporary.open("wb") as target_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=8 * 1024 * 1024)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+            if temporary.stat().st_size != source_path.stat().st_size:
+                raise OSError(f"size mismatch for {source_path}")
+            os.replace(temporary, target_path)
+            return
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+            delay = min(2**attempt, 30)
+            print(f"Retrying mounted-bucket read for {source_path.name} after {error!r} ({attempt}/{attempts})")
+            time.sleep(delay)
+
+data_target = target / "base_data_climbmix"
+for index, name in enumerate(shard_names, start=1):
+    source_path = source / "base_data_climbmix" / name
+    target_path = data_target / name
+    copy_with_retries(source_path, target_path)
+    parquet = pq.ParquetFile(target_path)
+    if parquet.num_row_groups < 1 or "text" not in parquet.schema.names:
+        raise SystemExit(f"Invalid staged Parquet file: {target_path}")
+    print(f"Staged and validated {name} ({index}/{len(shard_names)})")
+
+for name in ("tokenizer.pkl", "token_bytes.pt"):
+    source_path = source / "tokenizer" / name
+    target_path = target / "tokenizer" / name
+    copy_with_retries(source_path, target_path)
+    if target_path.stat().st_size == 0:
+        raise SystemExit(f"Empty staged tokenizer artifact: {target_path}")
+print(f"Staged {len(shard_names)} Parquet files and two tokenizer artifacts from {source}")
+PY
+}
+
 run_point() {
     local flops_budget="$1" depth="$2" runtime_base="$3"
     local point_name run_name model_tag log_file device_batch start_time end_time train_time row train_rc
@@ -434,10 +518,10 @@ run_point() {
         )
     fi
 
-    log "Starting $run_name with 8-process torchrun"
+    log "Starting $run_name with $NPROC_PER_NODE-process torchrun"
     start_time="$(date +%s)"
     set +e
-    NANOCHAT_BASE_DIR="$runtime_base" OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
+    NANOCHAT_BASE_DIR="$runtime_base" OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" -m scripts.base_train -- \
         --depth="$depth" \
         "${horizon_args[@]}" \
         --run="$run_name" \
@@ -469,15 +553,17 @@ worker_main() {
     [[ "$(git rev-parse HEAD)" == "$GIT_SHA" ]] || die "Worker checkout does not match GIT_SHA"
     log "HF accelerator metadata: ${ACCELERATOR:-unset}; requested flavor: $TRAIN_FLAVOR"
 
-    run_python - <<'PY'
+    run_python - "$NPROC_PER_NODE" <<'PY'
+import sys
 import torch
 
+expected = int(sys.argv[1])
 count = torch.cuda.device_count()
 names = [torch.cuda.get_device_name(index) for index in range(count)]
 print(f"CUDA_DEVICE_COUNT={count}")
 print(f"CUDA_DEVICE_NAMES={names}")
-if count != 8:
-    raise SystemExit(f"Expected 8 CUDA devices, found {count}")
+if count != expected:
+    raise SystemExit(f"Expected {expected} CUDA devices, found {count}")
 PY
 
     data_manifest_path="$NANOCHAT_MOUNT/data_manifest.json"
@@ -499,8 +585,7 @@ PY
 
     runtime_base="/workspace/nanochat-runtime-${JOB_ID:-local}"
     mkdir -p "$runtime_base/base_checkpoints"
-    ln -s "$NANOCHAT_MOUNT/base_data_climbmix" "$runtime_base/base_data_climbmix"
-    ln -s "$NANOCHAT_MOUNT/tokenizer" "$runtime_base/tokenizer"
+    stage_training_assets "$runtime_base"
 
     if [[ "$SMOKE_TEST" == "1" ]]; then
         flops_budgets=(2iters)
@@ -551,6 +636,7 @@ launcher_main() {
         --label "run_label=$RUN_LABEL"
         --label "git_sha=$git_sha"
         --label "smoke_test=$SMOKE_TEST"
+        --label "debug_h200x2=$DEBUG_H200X2"
         --flavor "$TRAIN_FLAVOR"
         --timeout "$TRAIN_TIMEOUT"
         --secrets HF_TOKEN
@@ -561,10 +647,12 @@ launcher_main() {
         --env "HF_BUCKET=$HF_BUCKET"
         --env "RUN_LABEL=$RUN_LABEL"
         --env "SMOKE_TEST=$SMOKE_TEST"
+        --env "DEBUG_H200X2=$DEBUG_H200X2"
         --env "TRACKIO_SPACE_ID=$TRACKIO_SPACE_ID"
         --env "TRACKIO_BUCKET=$TRACKIO_BUCKET"
         --env "TRAIN_IMAGE=$TRAIN_IMAGE"
         --env "TRAIN_FLAVOR=$TRAIN_FLAVOR"
+        --env "NPROC_PER_NODE=$NPROC_PER_NODE"
         --env "NANOCHAT_MOUNT=$NANOCHAT_MOUNT"
         --volume "hf://buckets/${HF_BUCKET}:${NANOCHAT_MOUNT}:rw"
         --
