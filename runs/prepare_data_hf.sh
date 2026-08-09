@@ -266,6 +266,7 @@ launcher_main() {
         --env "NUM_SHARDS=$NUM_SHARDS"
         --env "NANOCHAT_MOUNT=$NANOCHAT_MOUNT"
         --volume "hf://buckets/${HF_BUCKET}:${NANOCHAT_MOUNT}:rw"
+        --
         python:3.12-bookworm bash -lc "$remote_command"
     )
 
@@ -287,7 +288,7 @@ launcher_main() {
     log "Submitting data preparation Job for $git_sha"
     submit_output="$("${request[@]}")"
     printf '%s\n' "$submit_output"
-    job_id="$(printf '%s\n' "$submit_output" | tail -n 1 | tr -d '[:space:]')"
+    job_id="$(printf '%s\n' "$submit_output" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^id=/) {sub(/^id=/, "", $i); print $i; exit}}')"
     [[ -n "$job_id" ]] || die "HF CLI did not return a Job ID"
     printf 'Job ID: %s\n' "$job_id"
     printf 'Inspect: uv run --frozen hf jobs inspect %q --namespace %q\n' "$job_id" "$HF_NAMESPACE"

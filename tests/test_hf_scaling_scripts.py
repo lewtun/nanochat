@@ -66,6 +66,7 @@ def test_prepare_dry_run_contract():
     assert "--secrets HF_TOKEN" in request
     assert "--env NUM_SHARDS=170" in request
     assert "hf://buckets/lewtun/nanochat-scaling-laws:/mnt/nanochat:rw" in request
+    assert "-- python:3.12-bookworm bash -lc" in request
     assert "uv sync --frozen --extra cpu" in request
     assert "--worker" in request
     assert "hf_" not in request
@@ -85,6 +86,7 @@ def test_production_dry_run_contract():
     assert "TRACKIO_SPACE_ID=lewtun/nanochat-scaling-laws" in request
     assert "TRACKIO_BUCKET=lewtun/nanochat-scaling-laws" in request
     assert "hf://buckets/lewtun/nanochat-scaling-laws:/mnt/nanochat:rw" in request
+    assert "-- pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel bash -lc" in request
     assert "uv sync --frozen --extra gpu" in request
     assert "hf_" not in request
 

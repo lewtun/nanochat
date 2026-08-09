@@ -566,6 +566,7 @@ launcher_main() {
         --env "TRAIN_FLAVOR=$TRAIN_FLAVOR"
         --env "NANOCHAT_MOUNT=$NANOCHAT_MOUNT"
         --volume "hf://buckets/${HF_BUCKET}:${NANOCHAT_MOUNT}:rw"
+        --
         "$TRAIN_IMAGE" bash -lc "$remote_command"
     )
 
@@ -595,7 +596,7 @@ launcher_main() {
     log "Submitting $TRAIN_FLAVOR Job for RUN_LABEL=$RUN_LABEL"
     submit_output="$("${request[@]}")"
     printf '%s\n' "$submit_output"
-    job_id="$(printf '%s\n' "$submit_output" | tail -n 1 | tr -d '[:space:]')"
+    job_id="$(printf '%s\n' "$submit_output" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^id=/) {sub(/^id=/, "", $i); print $i; exit}}')"
     [[ -n "$job_id" ]] || die "HF CLI did not return a Job ID"
     printf 'Job ID: %s\n' "$job_id"
     printf 'Inspect: uv run --frozen hf jobs inspect %q --namespace %q\n' "$job_id" "$HF_NAMESPACE"
