@@ -87,6 +87,18 @@ A few more notes:
 
 If you are a researcher and wish to help improve nanochat, two scripts of interest are [runs/scaling_laws.sh](runs/scaling_laws.sh) and [runs/miniseries.sh](runs/miniseries.sh). See [Jan 7 miniseries v1](https://github.com/karpathy/nanochat/discussions/420) for related documentation. For quick experimentation (~5 min pretraining runs) my favorite scale is to train a 12-layer model (GPT-1 sized), e.g. like this:
 
+The Hugging Face Jobs version of the scaling-laws pipeline uses two separate launchers. First, `bash runs/prepare_data_hf.sh` submits a detached `cpu-xl` Job that downloads 170 training shards plus the validation shard and trains the 32K tokenizer. By default, the private bucket `lewtun/nanochat-scaling-laws` stores the Parquet files under `base_data_climbmix/`, tokenizer assets under `tokenizer/`, and the completed inventory at `data_manifest.json`. The preparation Job is idempotent and will not delete incompatible or unexpected bucket contents.
+
+After preparation is complete, launch the production sweep with an explicit label:
+
+```bash
+RUN_LABEL=my-sweep bash runs/scaling_laws_hf.sh
+```
+
+This submits one detached `h200x8` Job for all 24 points. Results, per-point logs, provenance, and state metadata are persisted under `scaling_laws/my-sweep/` in the same bucket. Trackio uses the private Space `lewtun/nanochat-scaling-laws` and the bucket mounted to that Space at `/data`. To run the small end-to-end acceptance path on the same eight-H200 hardware, set `SMOKE_TEST=1`; it uses the separate private Space and Trackio bucket `lewtun/nanochat-scaling-laws-smoke` while continuing to read training assets and write result logs through the production bucket.
+
+Both launchers accept `DRY_RUN=1` to print the fully escaped HF Jobs request without creating resources or submitting a Job. Override `HF_NAMESPACE`, `HF_BUCKET`, `GIT_REPO_URL`, or `GIT_REF` when needed; the selected Git commit must already be pushed.
+
 ```
 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
     --depth=12 \
@@ -164,8 +176,10 @@ I've published a number of guides that might contain helpful information, most r
 ├── pyproject.toml
 ├── runs
 │   ├── miniseries.sh               # Miniseries training script
+│   ├── prepare_data_hf.sh           # Prepare scaling-law assets on an HF CPU Job
 │   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
 │   ├── scaling_laws.sh             # Scaling laws experiments
+│   ├── scaling_laws_hf.sh           # Run scaling laws on one HF h200x8 Job
 │   └── speedrun.sh                 # Train the ~$100 nanochat d20
 ├── scripts
 │   ├── base_eval.py                # Base model: CORE score, bits per byte, samples
