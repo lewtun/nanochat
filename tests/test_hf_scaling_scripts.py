@@ -37,7 +37,7 @@ lm_head                 : 25,165,824
 transformer_matrices    : 80,000,000
 scalars                 : 30
 total                   : 142,914,590
-Using user-provided number of iterations: 2
+Calculated number of iterations from target FLOPs: 2
 Total training FLOPs estimate: 1.234500e+15
 Total batch size 524,288 => gradient accumulation steps: 1
 Step 00002 | Validation bpb: 2.345678
@@ -91,40 +91,10 @@ def test_production_dry_run_contract():
     assert "hf_" not in request
 
 
-def test_smoke_dry_run_contract():
-    result = run_script(
-        SCALING_SCRIPT,
-        env={"DRY_RUN": "1", "SMOKE_TEST": "1", "RUN_LABEL": "pytest-smoke"},
-    )
-    request = result.stdout
-    assert "--flavor h200x8" in request
-    assert "--timeout 2h" in request
-    assert "--label smoke_test=1" in request
-    assert "TRACKIO_SPACE_ID=lewtun/nanochat-scaling-laws-smoke" in request
-    assert "TRACKIO_BUCKET=lewtun/nanochat-scaling-laws-smoke" in request
-    assert "--env HF_BUCKET=lewtun/nanochat-scaling-laws" in request
-
-
-def test_two_h200_debug_dry_run_contract():
-    result = run_script(
-        SCALING_SCRIPT,
-        env={
-            "DRY_RUN": "1",
-            "SMOKE_TEST": "1",
-            "DEBUG_H200X2": "1",
-            "RUN_LABEL": "pytest-debug2",
-        },
-    )
-    request = result.stdout
-    assert "--flavor h200x2" in request
-    assert "--label debug_h200x2=1" in request
-    assert "--env NPROC_PER_NODE=2" in request
-
-
 def test_production_requires_run_label():
     result = run_script(
         SCALING_SCRIPT,
-        env={"DRY_RUN": "1", "RUN_LABEL": "", "SMOKE_TEST": "0"},
+        env={"DRY_RUN": "1", "RUN_LABEL": ""},
         check=False,
     )
     assert result.returncode != 0
@@ -136,15 +106,15 @@ def test_metric_parser_accepts_complete_log(training_log):
         SCALING_SCRIPT,
         "--parse-log",
         str(training_log),
-        "2iters",
+        "1e18",
         "10",
-        "scaling_pytest-smoke_2iters_d10",
+        "scaling_pytest-parser_1e18_d10",
         "42",
     )
     row = next(csv.reader([result.stdout]))
     assert len(row) == 18
-    assert row[0] == "scaling_pytest-smoke_2iters_d10"
-    assert row[1:5] == ["2iters", "1.2345e+15", "10", "640"]
+    assert row[0] == "scaling_pytest-parser_1e18_d10"
+    assert row[1:5] == ["1e18", "1.2345e+15", "10", "640"]
     assert row[11:18] == ["2", "1048576", "2.345678", "0.1234", "123456", "34.56", "42"]
 
 
@@ -154,9 +124,9 @@ def test_metric_parser_rejects_missing_core_metric(training_log):
         SCALING_SCRIPT,
         "--parse-log",
         str(training_log),
-        "2iters",
+        "1e18",
         "10",
-        "scaling_pytest-smoke_2iters_d10",
+        "scaling_pytest-parser_1e18_d10",
         "42",
         check=False,
     )

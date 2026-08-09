@@ -8,13 +8,11 @@ HF_BUCKET="${HF_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws}"
 GIT_REPO_URL="${GIT_REPO_URL:-https://github.com/lewtun/nanochat.git}"
 GIT_REF="${GIT_REF:-}"
 RUN_LABEL="${RUN_LABEL:-}"
-SMOKE_TEST="${SMOKE_TEST:-0}"
-DEBUG_H200X2="${DEBUG_H200X2:-0}"
-TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-}"
-TRACKIO_BUCKET="${TRACKIO_BUCKET:-}"
+TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-${HF_NAMESPACE}/nanochat-scaling-laws}"
+TRACKIO_BUCKET="${TRACKIO_BUCKET:-$HF_BUCKET}"
 TRAIN_IMAGE="${TRAIN_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}"
-TRAIN_FLAVOR="${TRAIN_FLAVOR:-h200x8}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+TRAIN_FLAVOR="h200x8"
+NPROC_PER_NODE=8
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -34,10 +32,10 @@ usage() {
     cat <<'EOF'
 Usage: RUN_LABEL=<label> bash runs/scaling_laws_hf.sh [--worker]
 
-The default mode submits one detached h200x8 Job for the complete 24-point
-sweep. Set SMOKE_TEST=1 to submit one two-iteration d10 acceptance run; when
-RUN_LABEL is omitted in smoke mode, a unique label is generated automatically.
-Set DEBUG_H200X2=1 together with SMOKE_TEST=1 for the two-H200 debug rung.
+Submits one detached h200x8 Job for the complete 24-point sweep.
+
+Example:
+  RUN_LABEL=august-2026 bash runs/scaling_laws_hf.sh
 
 --worker is reserved for the remote Job.
 EOF
@@ -81,50 +79,13 @@ print_command() {
     printf '\n'
 }
 
-configure_mode() {
-    local git_sha="${1:-}"
-    [[ "$SMOKE_TEST" == "0" || "$SMOKE_TEST" == "1" ]] || die "SMOKE_TEST must be 0 or 1"
-    [[ "$DEBUG_H200X2" == "0" || "$DEBUG_H200X2" == "1" ]] || die "DEBUG_H200X2 must be 0 or 1"
-    if [[ "$DEBUG_H200X2" == "1" ]]; then
-        [[ "$SMOKE_TEST" == "1" ]] || die "DEBUG_H200X2 requires SMOKE_TEST=1"
-        TRAIN_FLAVOR="h200x2"
-        NPROC_PER_NODE=2
-    else
-        TRAIN_FLAVOR="h200x8"
-        NPROC_PER_NODE=8
-    fi
-    if [[ "$SMOKE_TEST" == "1" ]]; then
-        if [[ -z "$RUN_LABEL" ]]; then
-            [[ -n "$git_sha" ]] || die "A Git SHA is needed to generate the test label"
-            if [[ "$DEBUG_H200X2" == "1" ]]; then
-                RUN_LABEL="debug2-$(date -u '+%Y%m%dT%H%M%SZ')-${git_sha:0:8}"
-            else
-                RUN_LABEL="smoke-$(date -u '+%Y%m%dT%H%M%SZ')-${git_sha:0:8}"
-            fi
-        fi
-        TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-${HF_NAMESPACE}/nanochat-scaling-laws-smoke}"
-        TRACKIO_BUCKET="${TRACKIO_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws-smoke}"
-        if [[ "$TRAIN_TIMEOUT" == "24h" ]]; then
-            TRAIN_TIMEOUT="2h"
-        fi
-    else
-        [[ -n "$RUN_LABEL" ]] || die "RUN_LABEL is required"
-        TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-${HF_NAMESPACE}/nanochat-scaling-laws}"
-        TRACKIO_BUCKET="${TRACKIO_BUCKET:-$HF_BUCKET}"
-    fi
-}
-
 validate_settings() {
     [[ -n "$RUN_LABEL" ]] || die "RUN_LABEL is required"
     [[ "$RUN_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "RUN_LABEL may contain only letters, numbers, dot, underscore, and hyphen"
     [[ "$HF_BUCKET" == */* ]] || die "HF_BUCKET must be namespace/name"
     [[ "$TRACKIO_BUCKET" == */* ]] || die "TRACKIO_BUCKET must be namespace/name"
     [[ "$TRACKIO_SPACE_ID" == */* ]] || die "TRACKIO_SPACE_ID must be namespace/name"
-    if [[ "$DEBUG_H200X2" == "1" ]]; then
-        [[ "$TRAIN_FLAVOR" == "h200x2" && "$NPROC_PER_NODE" == "2" ]] || die "Debug mode requires h200x2 with two processes"
-    else
-        [[ "$TRAIN_FLAVOR" == "h200x8" && "$NPROC_PER_NODE" == "8" ]] || die "Production and final smoke modes require h200x8 with eight processes"
-    fi
+    [[ "$TRAIN_FLAVOR" == "h200x8" && "$NPROC_PER_NODE" == "8" ]] || die "Scaling requires h200x8 with eight processes"
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
 }
 
@@ -296,8 +257,6 @@ payload = {
     "job_id": os.environ.get("JOB_ID", "unknown"),
     "git_sha": os.environ["GIT_SHA"],
     "run_label": os.environ["RUN_LABEL"],
-    "smoke_test": os.environ["SMOKE_TEST"] == "1",
-    "debug_h200x2": os.environ["DEBUG_H200X2"] == "1",
 }
 with tempfile.NamedTemporaryFile("w", dir=directory, prefix=f".{state}.", suffix=".tmp", delete=False) as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
@@ -326,8 +285,6 @@ payload = {
     "git_repo_url": os.environ["GIT_REPO_URL"],
     "job_id": os.environ.get("JOB_ID", "unknown"),
     "run_label": os.environ["RUN_LABEL"],
-    "smoke_test": os.environ["SMOKE_TEST"] == "1",
-    "debug_h200x2": os.environ["DEBUG_H200X2"] == "1",
     "hardware": os.environ["TRAIN_FLAVOR"],
     "image": os.environ["TRAIN_IMAGE"],
     "data_bucket": os.environ["HF_BUCKET"],
@@ -417,7 +374,7 @@ PY
 stage_training_assets() {
     local runtime_base="$1"
     log "Staging training assets from the mounted bucket into local Job storage"
-    run_python - "$NANOCHAT_MOUNT" "$runtime_base" "$SMOKE_TEST" <<'PY'
+    run_python - "$NANOCHAT_MOUNT" "$runtime_base" <<'PY'
 import os
 import shutil
 import sys
@@ -428,11 +385,7 @@ import pyarrow.parquet as pq
 
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
-smoke_test = sys.argv[3] == "1"
-if smoke_test:
-    shard_names = ["shard_00000.parquet", "shard_06542.parquet"]
-else:
-    shard_names = [f"shard_{index:05d}.parquet" for index in range(170)] + ["shard_06542.parquet"]
+shard_names = [f"shard_{index:05d}.parquet" for index in range(170)] + ["shard_06542.parquet"]
 
 def copy_with_retries(source_path, target_path, attempts=5):
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,25 +451,14 @@ run_point() {
         device_batch=32
     fi
 
-    if [[ "$SMOKE_TEST" == "1" ]]; then
-        horizon_args=(--num-iterations=2 --target-param-data-ratio=-1)
-        train_args=(
-            --eval-tokens=524288
-            --core-metric-every=999999
-            --core-metric-max-per-task=1
-            --sample-every=-1
-            --save-every=-1
-        )
-    else
-        horizon_args=(--target-flops="$flops_budget" --target-param-data-ratio=-1)
-        train_args=(
-            --eval-tokens=52428800
-            --core-metric-every=999999
-            --core-metric-max-per-task=-1
-            --sample-every=-1
-            --save-every=-1
-        )
-    fi
+    horizon_args=(--target-flops="$flops_budget" --target-param-data-ratio=-1)
+    train_args=(
+        --eval-tokens=52428800
+        --core-metric-every=999999
+        --core-metric-max-per-task=-1
+        --sample-every=-1
+        --save-every=-1
+    )
 
     log "Starting $run_name with $NPROC_PER_NODE-process torchrun"
     start_time="$(date +%s)"
@@ -544,9 +486,8 @@ run_point() {
 }
 
 worker_main() {
-    local runtime_base data_manifest_path row_count expected_rows exit_code
+    local runtime_base data_manifest_path row_count exit_code
     local -a flops_budgets depths
-    configure_mode "${GIT_SHA:-}"
     validate_settings
     [[ -d "$NANOCHAT_MOUNT" ]] || die "Bucket is not mounted at $NANOCHAT_MOUNT"
     [[ -n "${GIT_SHA:-}" ]] || die "GIT_SHA is required in worker mode"
@@ -587,13 +528,8 @@ PY
     mkdir -p "$runtime_base/base_checkpoints"
     stage_training_assets "$runtime_base"
 
-    if [[ "$SMOKE_TEST" == "1" ]]; then
-        flops_budgets=(2iters)
-        depths=(10)
-    else
-        flops_budgets=(1e18 2.15e18 4.64e18 1e19)
-        depths=(10 12 14 16 18 20)
-    fi
+    flops_budgets=(1e18 2.15e18 4.64e18 1e19)
+    depths=(10 12 14 16 18 20)
 
     for flops_budget in "${flops_budgets[@]}"; do
         for depth in "${depths[@]}"; do
@@ -608,9 +544,7 @@ with open(sys.argv[1], newline="") as handle:
     print(sum(1 for _ in csv.DictReader(handle)))
 PY
 )"
-    expected_rows=24
-    [[ "$SMOKE_TEST" == "0" ]] || expected_rows=1
-    [[ "$row_count" -eq "$expected_rows" ]] || die "Expected $expected_rows result rows, found $row_count"
+    [[ "$row_count" -eq 24 ]] || die "Expected 24 result rows, found $row_count"
     write_status COMPLETE
     release_writer_lock
     trap - EXIT
@@ -623,7 +557,6 @@ launcher_main() {
     command -v git >/dev/null 2>&1 || die "git is required"
     command -v uv >/dev/null 2>&1 || die "uv is required"
     git_sha="$(resolve_git_sha)"
-    configure_mode "$git_sha"
     validate_settings
     job_name="nanochat-scaling-${RUN_LABEL}"
     remote_command="$(remote_bootstrap_command)"
@@ -635,8 +568,6 @@ launcher_main() {
         --label pipeline=nanochat-scaling-laws
         --label "run_label=$RUN_LABEL"
         --label "git_sha=$git_sha"
-        --label "smoke_test=$SMOKE_TEST"
-        --label "debug_h200x2=$DEBUG_H200X2"
         --flavor "$TRAIN_FLAVOR"
         --timeout "$TRAIN_TIMEOUT"
         --secrets HF_TOKEN
@@ -646,8 +577,6 @@ launcher_main() {
         --env "HF_NAMESPACE=$HF_NAMESPACE"
         --env "HF_BUCKET=$HF_BUCKET"
         --env "RUN_LABEL=$RUN_LABEL"
-        --env "SMOKE_TEST=$SMOKE_TEST"
-        --env "DEBUG_H200X2=$DEBUG_H200X2"
         --env "TRACKIO_SPACE_ID=$TRACKIO_SPACE_ID"
         --env "TRACKIO_BUCKET=$TRACKIO_BUCKET"
         --env "TRAIN_IMAGE=$TRAIN_IMAGE"
