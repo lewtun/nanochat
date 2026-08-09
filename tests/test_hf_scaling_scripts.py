@@ -101,6 +101,33 @@ def test_production_requires_run_label():
     assert "RUN_LABEL is required" in result.stderr
 
 
+@pytest.mark.parametrize("script", [PREP_SCRIPT, SCALING_SCRIPT])
+def test_job_id_parser_accepts_hf_cli_output(script):
+    result = subprocess.run(
+        ["bash", str(script), "--parse-job-id"],
+        cwd=REPO_ROOT,
+        input="✓ Job started\n  id: 6a78e49e3e1f34a7e32c100e\n  name: nanochat-scaling\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "6a78e49e3e1f34a7e32c100e"
+
+
+@pytest.mark.parametrize("script", [PREP_SCRIPT, SCALING_SCRIPT])
+def test_job_id_parser_rejects_unrecognized_output(script):
+    result = subprocess.run(
+        ["bash", str(script), "--parse-job-id"],
+        cwd=REPO_ROOT,
+        input="Job submission output without an identifier\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
 def test_metric_parser_accepts_complete_log(training_log):
     result = run_script(
         SCALING_SCRIPT,

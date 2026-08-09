@@ -70,6 +70,10 @@ run_python() {
     fi
 }
 
+parse_job_id() {
+    awk '$1 == "id:" && NF == 2 { print $2; found = 1; exit } END { if (!found) exit 1 }'
+}
+
 validate_settings() {
     [[ "$NUM_SHARDS" =~ ^[1-9][0-9]*$ ]] || die "NUM_SHARDS must be a positive integer"
     (( NUM_SHARDS <= 6542 )) || die "NUM_SHARDS must not exceed 6542"
@@ -288,8 +292,9 @@ launcher_main() {
     log "Submitting data preparation Job for $git_sha"
     submit_output="$("${request[@]}")"
     printf '%s\n' "$submit_output"
-    job_id="$(printf '%s\n' "$submit_output" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^id=/) {sub(/^id=/, "", $i); print $i; exit}}')"
-    [[ -n "$job_id" ]] || die "HF CLI did not return a Job ID"
+    if ! job_id="$(printf '%s\n' "$submit_output" | parse_job_id)"; then
+        die "HF CLI did not return a recognizable Job ID"
+    fi
     printf 'Job ID: %s\n' "$job_id"
     printf 'Inspect: uv run --frozen hf jobs inspect %q --namespace %q\n' "$job_id" "$HF_NAMESPACE"
     printf 'Logs: uv run --frozen hf jobs logs -f %q --namespace %q\n' "$job_id" "$HF_NAMESPACE"
@@ -302,6 +307,11 @@ case "${1:-}" in
         shift
         [[ $# -eq 0 ]] || die "Unexpected worker arguments: $*"
         worker_main
+        ;;
+    --parse-job-id)
+        shift
+        [[ $# -eq 0 ]] || die "--parse-job-id reads HF CLI output from stdin"
+        parse_job_id
         ;;
     -h|--help)
         usage

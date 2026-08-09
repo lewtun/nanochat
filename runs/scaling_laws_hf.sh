@@ -73,6 +73,10 @@ run_python() {
     fi
 }
 
+parse_job_id() {
+    awk '$1 == "id:" && NF == 2 { print $2; found = 1; exit } END { if (!found) exit 1 }'
+}
+
 print_command() {
     printf 'Request: '
     printf '%q ' "$@"
@@ -614,8 +618,9 @@ launcher_main() {
     log "Submitting $TRAIN_FLAVOR Job for RUN_LABEL=$RUN_LABEL"
     submit_output="$("${request[@]}")"
     printf '%s\n' "$submit_output"
-    job_id="$(printf '%s\n' "$submit_output" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^id=/) {sub(/^id=/, "", $i); print $i; exit}}')"
-    [[ -n "$job_id" ]] || die "HF CLI did not return a Job ID"
+    if ! job_id="$(printf '%s\n' "$submit_output" | parse_job_id)"; then
+        die "HF CLI did not return a recognizable Job ID"
+    fi
     printf 'Job ID: %s\n' "$job_id"
     printf 'Inspect: uv run --frozen hf jobs inspect %q --namespace %q\n' "$job_id" "$HF_NAMESPACE"
     printf 'Logs: uv run --frozen hf jobs logs -f %q --namespace %q\n' "$job_id" "$HF_NAMESPACE"
@@ -635,6 +640,11 @@ case "${1:-}" in
         shift
         [[ $# -eq 5 ]] || die "--parse-log requires LOG FLOPS DEPTH RUN_NAME TRAIN_TIME"
         parse_training_log "$@"
+        ;;
+    --parse-job-id)
+        shift
+        [[ $# -eq 0 ]] || die "--parse-job-id reads HF CLI output from stdin"
+        parse_job_id
         ;;
     -h|--help)
         usage
