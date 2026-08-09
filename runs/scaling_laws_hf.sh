@@ -168,16 +168,17 @@ except RepositoryNotFoundError:
     deploy.create_space_if_not_exists(space_id, bucket_id=bucket_id, private=True)
 else:
     files = {item.rfilename for item in info.siblings}
-    if "ui/main.py" not in files:
+    if not ({"app.py", "ui/main.py"} & files):
         deploy.deploy_as_space(space_id, bucket_id=bucket_id, private=True)
 PY
     hf_cli spaces volumes set "$space_id" --volume "hf://buckets/${bucket_id}:/data" >/dev/null
+    hf_cli spaces wait "$space_id" --timeout 10m >/dev/null
 }
 
 verify_private_resources() {
     local space_id="$1" bucket_id="$2"
     hf_cli buckets info "$bucket_id" --format json | run_python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "Trackio bucket must be private"'
-    hf_cli spaces info "$space_id" --format json | run_python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "Trackio Space must be private"; files={x["rfilename"] for x in info.get("siblings", [])}; assert "ui/main.py" in files, "Trackio UI is missing"'
+    hf_cli spaces info "$space_id" --format json | run_python -c 'import json,sys; info=json.load(sys.stdin); assert info.get("private") is True, "Trackio Space must be private"; files={x["rfilename"] for x in info.get("siblings", [])}; assert {"app.py", "ui/main.py"} & files, "Trackio UI is missing"'
     hf_cli spaces volumes list "$space_id" --format json | run_python -c '
 import json, sys
 payload = json.load(sys.stdin)
