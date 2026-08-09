@@ -15,7 +15,6 @@ TRAIN_FLAVOR="h200x8"
 NPROC_PER_NODE=8
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
-DRY_RUN="${DRY_RUN:-0}"
 
 RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,num_iterations,tokens_trained,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
@@ -117,12 +116,6 @@ run_python() {
 
 parse_job_id() {
     awk '$1 == "id:" && NF == 2 { print $2; found = 1; exit } END { if (!found) exit 1 }'
-}
-
-print_command() {
-    printf 'Request: '
-    printf '%q ' "$@"
-    printf '\n'
 }
 
 validate_settings() {
@@ -636,15 +629,6 @@ launcher_main() {
         "$TRAIN_IMAGE" bash -lc "$remote_command"
     )
 
-    if [[ "$DRY_RUN" == "1" ]]; then
-        printf 'RUN_LABEL=%s\n' "$RUN_LABEL"
-        printf 'TRACKIO_SPACE_ID=%s\n' "$TRACKIO_SPACE_ID"
-        printf 'TRACKIO_BUCKET=%s\n' "$TRACKIO_BUCKET"
-        print_command "${request[@]}"
-        return
-    fi
-
-    [[ "$DRY_RUN" == "0" ]] || die "DRY_RUN must be 0 or 1"
     assert_pushed_sha "$git_sha"
     hf_cli auth whoami >/dev/null
     manifest_git_sha="$(hf_cli buckets cp "hf://buckets/${HF_BUCKET}/data_manifest.json" - | validate_data_manifest_stream)"

@@ -63,83 +63,14 @@ def test_original_scaling_script_is_untouched():
     assert digest == "f510a904dca15271b9c1909630c047358500f92007c31018e2723f07c9cb48d3"
 
 
-def test_prepare_dry_run_contract():
-    result = run_script(PREP_SCRIPT, env={"DRY_RUN": "1", **TEST_HF_ENV})
-    request = result.stdout
-    assert "--flavor cpu-xl" in request
-    assert "--timeout 4h" in request
-    assert "--secrets HF_TOKEN" in request
-    assert "--env NUM_SHARDS=170" in request
-    assert "--namespace pytest-user" in request
-    assert "hf://buckets/pytest-user/nanochat-scaling-laws:/mnt/nanochat:rw" in request
-    assert "-- python:3.12-bookworm bash -lc" in request
-    assert "uv sync --frozen --extra cpu" in request
-    assert "--worker" in request
-    assert "hf_" not in request
-
-
-def test_production_dry_run_contract():
-    result = run_script(
-        SCALING_SCRIPT,
-        env={
-            "DRY_RUN": "1",
-            "RUN_LABEL": "pytest-production",
-            "TRACKIO_SPACE_ID": "pytest-user/nanochat-scaling-laws",
-            "TRACKIO_BUCKET": "pytest-user/nanochat-scaling-laws",
-            **TEST_HF_ENV,
-        },
-    )
-    request = result.stdout
-    assert "--flavor h200x8" in request
-    assert "--timeout 24h" in request
-    assert "pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel" in request
-    assert "--secrets HF_TOKEN" in request
-    assert "--label run_label=pytest-production" in request
-    assert "--namespace pytest-user" in request
-    assert "TRACKIO_SPACE_ID=pytest-user/nanochat-scaling-laws" in request
-    assert "TRACKIO_BUCKET=pytest-user/nanochat-scaling-laws" in request
-    assert "hf://buckets/pytest-user/nanochat-scaling-laws:/mnt/nanochat:rw" in request
-    assert "-- pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel bash -lc" in request
-    assert "uv sync --frozen --extra gpu" in request
-    assert "hf_" not in request
-
-
 def test_production_requires_run_label():
     result = run_script(
         SCALING_SCRIPT,
-        env={"DRY_RUN": "1", "RUN_LABEL": "", **TEST_HF_ENV},
+        env={"RUN_LABEL": "", **TEST_HF_ENV},
         check=False,
     )
     assert result.returncode != 0
     assert "RUN_LABEL is required" in result.stderr
-
-
-@pytest.mark.parametrize("script", [PREP_SCRIPT, SCALING_SCRIPT])
-def test_namespace_defaults_to_logged_in_hf_user(script, tmp_path):
-    fake_uv = tmp_path / "uv"
-    fake_uv.write_text(
-        """#!/bin/sh
-if [ "$1" = run ] && [ "$2" = --frozen ] && [ "$3" = hf ] && [ "$4" = auth ] && [ "$5" = whoami ] && [ "$6" = --quiet ]; then
-    printf 'cli-user\\n'
-    exit 0
-fi
-exit 99
-"""
-    )
-    fake_uv.chmod(0o755)
-    env = {
-        "DRY_RUN": "1",
-        "HF_NAMESPACE": "",
-        "HF_BUCKET": "",
-        "GIT_REPO_URL": "https://github.com/example/nanochat.git",
-        "PATH": f"{tmp_path}:{os.environ['PATH']}",
-    }
-    if script == SCALING_SCRIPT:
-        env.update({"RUN_LABEL": "pytest-cli-user", "TRACKIO_SPACE_ID": "", "TRACKIO_BUCKET": ""})
-    result = run_script(script, env=env)
-    assert "--namespace cli-user" in result.stdout
-    assert "hf://buckets/cli-user/nanochat-scaling-laws:/mnt/nanochat:rw" in result.stdout
-
 
 @pytest.mark.parametrize("script", [PREP_SCRIPT, SCALING_SCRIPT])
 def test_job_id_parser_accepts_hf_cli_output(script):

@@ -11,7 +11,6 @@ NUM_SHARDS="${NUM_SHARDS:-170}"
 PREP_FLAVOR="${PREP_FLAVOR:-cpu-xl}"
 PREP_TIMEOUT="${PREP_TIMEOUT:-4h}"
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
-DRY_RUN="${DRY_RUN:-0}"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -50,12 +49,6 @@ assert_pushed_sha() {
     if ! git -C "$root" branch -r --contains "$sha" | sed 's/^[[:space:]]*//' | grep -q '^origin/'; then
         die "Git SHA $sha is not present in any local origin/* ref. Push it before launching."
     fi
-}
-
-print_command() {
-    printf 'Request: '
-    printf '%q ' "$@"
-    printf '\n'
 }
 
 hf_cli() {
@@ -318,12 +311,6 @@ launcher_main() {
         python:3.12-bookworm bash -lc "$remote_command"
     )
 
-    if [[ "$DRY_RUN" == "1" ]]; then
-        print_command "${request[@]}"
-        return
-    fi
-
-    [[ "$DRY_RUN" == "0" ]] || die "DRY_RUN must be 0 or 1"
     assert_pushed_sha "$git_sha"
     hf_cli auth whoami >/dev/null
     hf_cli buckets create "$HF_BUCKET" --private --exist-ok >/dev/null

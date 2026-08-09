@@ -97,7 +97,7 @@ RUN_LABEL=my-sweep bash runs/scaling_laws_hf.sh
 
 This submits one detached `h200x8` Job for all 24 points. Results, per-point logs, provenance, and state metadata are persisted under `scaling_laws/my-sweep/` in the same bucket. Trackio uses the private Space `<hf-user>/nanochat-scaling-laws` and the bucket mounted to that Space at `/data`. Before starting Trackio or distributed training, the Job stages all prepared Parquet shards and tokenizer files into ephemeral storage with retrying reads.
 
-Both launchers accept `DRY_RUN=1` to print the fully escaped HF Jobs request without creating resources or submitting a Job. Override `HF_NAMESPACE`, `HF_BUCKET`, `TRACKIO_SPACE_ID`, `TRACKIO_BUCKET`, `GIT_REPO_URL`, or `GIT_REF` when needed. `GIT_REPO_URL` otherwise comes from the local `origin` remote, with GitHub SSH URLs converted to public HTTPS clone URLs. The selected Git commit must already be pushed.
+Override `HF_NAMESPACE`, `HF_BUCKET`, `TRACKIO_SPACE_ID`, `TRACKIO_BUCKET`, `GIT_REPO_URL`, or `GIT_REF` when needed. `GIT_REPO_URL` otherwise comes from the local `origin` remote, with GitHub SSH URLs converted to public HTTPS clone URLs. The selected Git commit must already be pushed.
 
 ```
 OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
