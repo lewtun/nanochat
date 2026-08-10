@@ -32,7 +32,7 @@ DEPTHS=(12 14 16 18 20 22 24 26)
 # Hardware
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 # Logging
-WANDB_RUN="${WANDB_RUN:-${SERIES_NAME}_miniseries}"
+TRACKIO_RUN="${TRACKIO_RUN:-${SERIES_NAME}_miniseries}"
 
 RESULTS_DIR="$NANOCHAT_BASE_DIR/${SERIES_NAME}_miniseries_results"
 mkdir -p "$RESULTS_DIR"
@@ -68,7 +68,7 @@ for d in "${DEPTHS[@]}"; do
 
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
         --depth=$d \
-        --run="${WANDB_RUN}_d${d}" \
+        --run="${TRACKIO_RUN}_d${d}" \
         --model-tag="${TAG}" \
         --core-metric-every=999999 \
         --core-metric-max-per-task=-1 \

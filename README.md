@@ -97,15 +97,29 @@ OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train
     --save-every=-1 \
 ```
 
-This uses wandb (run name "d12"), only runs the CORE metric on last step, and it doesn't sample and save intermediate checkpoints. I like to change something in the code, re-run a d12 (or a d16 etc) and see if it helped, in an iteration loop. To see if a run helps, I like to monitor the wandb plots for:
+This logs a local Trackio run named "d12", only runs the CORE metric on the last step, and doesn't sample or save intermediate checkpoints. Launch the dashboard with `trackio show --project nanochat`. To share runs remotely, set `TRACKIO_SPACE_ID` to a Hugging Face Space ID before training; Trackio will create or reuse the Space. I like to change something in the code, re-run a d12 (or a d16 etc), and see if it helped in an iteration loop. To evaluate a run, I monitor these Trackio plots:
 
 1. `val_bpb` (validation loss in vocab-size-invariant units of bits per byte) as a function of `step`, `total_training_time` and `total_training_flops`.
 2. `core_metric` (the DCLM CORE score)
 3. VRAM utilization, `train/mfu` (Model FLOPS utilization), `train/tok_per_sec` (training throughput)
 
-See an example [here](https://github.com/karpathy/nanochat/pull/498#issuecomment-3850720044).
-
 The important thing to note is that nanochat is written and configured around one single dial of complexity - the depth of the transformer. This single integer automatically determines all other hyperparameters (the width of the transformer, number of heads, learning rate adjustments, training horizons, weight decays, ...) so that the trained model comes out compute optimal. The idea is that the user doesn't have to think about or set any of this, they are simply asking for a smaller or bigger model using `--depth`, and everything "just works". By sweeping out the depth, you achieve the nanochat miniseries of compute optimal models at various sizes. GPT-2 capability model (which is of most interest at the moment) happens to be somewhere around d24-d26 range with the current code. But any candidate changes to the repo have to be principled enough that they work for all settings of depth.
+
+### Scaling laws
+
+The Hugging Face Jobs version of the scaling-laws pipeline uses two separate launchers. First, `bash runs/prepare_data_hf.sh` submits a detached `cpu-xl` Job that downloads 170 training shards plus the validation shard and trains the 32K tokenizer. By default, the launcher gets the current Hub username from `hf auth whoami` and uses the private bucket `<hf-user>/nanochat-scaling-laws`. It stores the Parquet files under `base_data_climbmix/`, tokenizer assets under `tokenizer/`, and the completed inventory at `data_manifest.json`. The preparation Job is idempotent and will not delete incompatible or unexpected bucket contents.
+
+After preparation is complete, launch the production sweep with an explicit label:
+
+```bash
+RUN_LABEL=my-sweep bash runs/scaling_laws_hf.sh
+```
+
+This submits one detached `h200x8` Job for the default 24-point sweep. Results, per-point logs, provenance, and state metadata are persisted under `scaling_laws/my-sweep/` in the same bucket. Trackio uses the private Space `<hf-user>/nanochat-scaling-laws` and the bucket mounted to that Space at `/data`. Before starting Trackio or distributed training, the Job stages all prepared Parquet shards and tokenizer files into ephemeral storage with retrying reads.
+
+To change the sweep, edit the top-level `FLOPS_BUDGETS` and `DEPTHS` arrays in `runs/scaling_laws_hf.sh`, then commit and push the change before launching. The exact arrays are recorded in each run's `provenance.json`.
+
+Override `HF_NAMESPACE`, `HF_BUCKET`, `TRACKIO_SPACE_ID`, `TRACKIO_BUCKET`, `GIT_REPO_URL`, or `GIT_REF` when needed. `GIT_REPO_URL` otherwise comes from the local `origin` remote, with GitHub SSH URLs converted to public HTTPS clone URLs. The selected Git commit must already be pushed.
 
 ## Running on CPU / MPS
 
@@ -166,8 +180,10 @@ I've published a number of guides that might contain helpful information, most r
 ├── pyproject.toml
 ├── runs
 │   ├── miniseries.sh               # Miniseries training script
+│   ├── prepare_data_hf.sh           # Prepare scaling-law assets on an HF CPU Job
 │   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
 │   ├── scaling_laws.sh             # Scaling laws experiments
+│   ├── scaling_laws_hf.sh           # Run scaling laws on one HF h200x8 Job
 │   └── speedrun.sh                 # Train the ~$100 nanochat d20
 ├── scripts
 │   ├── base_eval.py                # Base model: CORE score, bits per byte, samples

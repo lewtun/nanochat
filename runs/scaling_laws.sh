@@ -11,7 +11,7 @@ FLOPS_BUDGETS=(
 DEPTHS=(10 12 14 16 18 20)
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-WANDB_RUN="${WANDB_RUN:-scaling_${LABEL}}"
+TRACKIO_RUN="${TRACKIO_RUN:-scaling_${LABEL}}"
 EVAL_TOKENS=$((100 * 524288))  # ~100M tokens for final eval (default is ~10M)
 
 export OMP_NUM_THREADS=1
@@ -79,7 +79,7 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
             --depth=$d \
             --target-flops=$flops \
             --target-param-data-ratio=-1 \
-            --run="${WANDB_RUN}_${TAG}" \
+            --run="${TRACKIO_RUN}_${TAG}" \
             --model-tag="${TAG}" \
             --eval-tokens=$EVAL_TOKENS \
             --core-metric-every=999999 \

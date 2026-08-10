@@ -195,7 +195,7 @@ class _Float8Matmul(torch.autograd.Function):
 class Float8Linear(nn.Linear):
     """Drop-in nn.Linear replacement that does FP8 compute.
 
-    Weights and biases remain in their original precision (e.g. fp32/bf16).
+    Model parameters remain in their original precision (e.g. fp32/bf16).
     Only the matmul is performed in FP8 via the _Float8Matmul autograd function.
     """
 

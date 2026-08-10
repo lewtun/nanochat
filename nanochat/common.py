@@ -213,8 +213,8 @@ def compute_cleanup():
     if is_ddp_initialized():
         dist.destroy_process_group()
 
-class DummyWandb:
-    """Useful if we wish to not use wandb but have all the same signatures"""
+class DummyTracker:
+    """No-op experiment tracker with the same logging lifecycle as Trackio."""
     def __init__(self):
         pass
     def log(self, *args, **kwargs):

@@ -214,7 +214,7 @@ Quality of life, footguns, minor fixes:
 
 - **Hyperparameter inheritance**: SFT now inherits batch sizes and LRs from the pretrained checkpoint metadata by default (CLI overrides still work). Also saved `total_batch_size` to `base_train.py` checkpoint metadata.
 - **GC management**: disabled Python GC after step 1 to avoid ~500ms pauses (manual collect every 5000 steps), same as base pretraining.
-- **ChatCORE eval**: periodic eval during SFT (`--chatcore-every=200`) across all 6 tasks, logged to wandb.
+- **ChatCORE eval**: periodic eval during SFT (`--chatcore-every=200`) across all 6 tasks, logged to the experiment tracker.
 - **MFU**: uses `get_peak_flops()` for actual GPU instead of hardcoded H100 value.
 - Removed `--dry-run` and `--dtype` flags. All ranks now participate in checkpoint save.
 
