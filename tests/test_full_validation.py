@@ -29,3 +29,20 @@ def test_full_validation_scores_each_text_token_once(tmp_path, world_size):
             assert x.shape == y.shape and x.shape[1] >= 2
             scored.extend(i for i in y.flatten().tolist() if i >= 3)
     assert sorted(scored) == list(range(3, 20))
+
+
+def test_full_pass_bpb_ignores_padding_and_special_tokens(tmp_path):
+    import math
+    import torch
+    from nanochat.loss_eval import evaluate_bpb
+
+    path = tmp_path / 'val.parquet'
+    pq.write_table(pa.table({'text': ['3 4 5 6 7', '8', '9 10']}), path)
+    token_bytes = torch.tensor([0, 0, 0] + [1] * 8)
+
+    class Model:
+        def get_device(self): return torch.device('cpu')
+        def __call__(self, x, y, loss_reduction): return torch.full_like(y, 2, dtype=torch.float)
+
+    value = evaluate_bpb(Model(), full_document_validation_batches(FakeTokenizer(), path, 2, 3, 0, 1, 'cpu'), None, token_bytes)
+    assert value == pytest.approx(2 / math.log(2))

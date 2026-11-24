@@ -661,19 +661,26 @@ print('yes' if lower <= ratio <= upper else 'no')
 PYRATIO
 )"
     if [[ "$inside_window" == no ]]; then
+        local reason=ratio_window
         log "Skipping $point_name: estimated tokens:params $ratio outside [$MIN_TOKEN_PARAM_RATIO, $MAX_TOKEN_PARAM_RATIO]"
-        printf '%s,%s,%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" >> "$RESULTS_DIR/skipped.csv"
+        printf '%s,%s,%s,%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" "$reason" >> "$RESULTS_DIR/skipped.csv"
         skipped_count=$((skipped_count + 1))
         return
     fi
-    if ! run_python - "$point_info" "$flops_budget" "$MIN_STEPS" "$NPROC_PER_NODE" <<'PYSTEPS'
-import json, sys
+    local feasible
+    feasible="$(run_python - "$point_info" "$flops_budget" "$MIN_STEPS" "$NPROC_PER_NODE" <<'PYSTEPS'
+import json, math, sys
 info = json.loads(sys.argv[1]); budget = float(sys.argv[2]); min_steps = int(sys.argv[3]); ranks = int(sys.argv[4])
-raise SystemExit(0 if not min_steps or budget / info['flops_per_token'] >= min_steps * 2048 * ranks else 1)
+flops_per_token = float(info['flops_per_token'])
+if not math.isfinite(flops_per_token) or flops_per_token <= 0:
+    raise SystemExit('Invalid FLOPs per token')
+print('yes' if not min_steps or budget / flops_per_token >= min_steps * 2048 * ranks else 'no')
 PYSTEPS
-    then
+)"
+    if [[ "$feasible" == no ]]; then
+        local reason=min_steps
         log "Skipping $point_name: budget cannot fit $MIN_STEPS steps at the minimum distributed batch"
-        printf '%s,%s,%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" >> "$RESULTS_DIR/skipped.csv"
+        printf '%s,%s,%s,%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" "$reason" >> "$RESULTS_DIR/skipped.csv"
         skipped_count=$((skipped_count + 1))
         return
     fi
