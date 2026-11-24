@@ -75,7 +75,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     tokenizer, B, T, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
-    buffer_size=1000, track_data_exposure=False
+    buffer_size=1000, track_data_exposure=False, document_eos=False
 ):
     """
     BOS-aligned dataloader with Best-Fit Cropping.
@@ -94,6 +94,11 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     - Approximately 35% of all tokens are discarded due to cropping
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
+    if document_eos:
+        yield from tokenizing_distributed_data_loader_with_state_bos_eos(
+            tokenizer, B, T, split, tokenizer_threads, tokenizer_batch_size,
+            device, resume_state_dict, track_data_exposure)
+        return
 
     row_capacity = T + 1
     batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
@@ -182,3 +187,82 @@ def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
     """Helper that omits state_dict from yields."""
     for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
         yield inputs, targets
+
+
+def tokenizing_distributed_data_loader_with_state_bos_eos(
+    tokenizer, B, T, split, tokenizer_threads=4, tokenizer_batch_size=128,
+    device='cuda', resume_state_dict=None, track_data_exposure=False,
+):
+    """Pack complete BOS/text/EOS documents into overlapping training rows.
+
+    Carry the final token into the next row, so every subsequent token is a
+    target exactly once, including EOS and long document tails. There is no
+    artificial EOS when a context window ends. The pre-existing best-fit
+    loader remains the default for non-EOS datasets.
+    """
+    from collections import deque
+
+    if '<|eos|>' not in tokenizer.get_special_tokens():
+        raise ValueError('document EOS requested but tokenizer has no <|eos|> token')
+    batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
+    bos = tokenizer.get_bos_token_id()
+    eos = tokenizer.encode_special('<|eos|>')
+    queue = deque()
+    pq_idx, rg_idx, epoch = 0, 0, 1
+    seen_prefixes = {}
+    unique_text_tokens = text_tokens = 0
+    carry = None
+
+    def refill():
+        nonlocal pq_idx, rg_idx, epoch
+        docs, (pq_idx, rg_idx, epoch), offset = next(batches)
+        encoded = tokenizer.encode(docs, prepend=bos, append=eos, num_threads=tokenizer_threads)
+        for i, ids in enumerate(encoded):
+            queue.append([ids, (pq_idx, rg_idx, offset+i), 0])
+
+    def ensure_document():
+        while not queue:
+            refill()
+
+    use_cuda = device == 'cuda'
+    rows = torch.empty((B, T+1), dtype=torch.long)
+    cpu = torch.empty(2*B*T, dtype=torch.long, pin_memory=use_cuda)
+    gpu = torch.empty(2*B*T, dtype=torch.long, device=device)
+    cpu_x, cpu_y = cpu[:B*T].view(B,T), cpu[B*T:].view(B,T)
+    x, y = gpu[:B*T].view(B,T), gpu[B*T:].view(B,T)
+
+    while True:
+        for row_idx in range(B):
+            if carry is None:
+                ensure_document()
+                ids, _, pos = queue[0]
+                carry = ids[pos]
+                queue[0][2] += 1
+                if queue[0][2] == len(ids):
+                    queue.popleft()
+            values = [carry]
+            while len(values) < T+1:
+                ensure_document()
+                ids, doc_id, start = queue[0]
+                end = min(len(ids), start + (T+1-len(values)))
+                values.extend(ids[start:end])
+                if track_data_exposure:
+                    lo, hi = max(start, 1), min(end, len(ids)-1)
+                    used = max(0, hi-lo)
+                    text_tokens += used
+                    if used:
+                        previous = seen_prefixes.get(doc_id, 0)
+                        unique_text_tokens += max(0, hi - max(lo, previous+1))
+                        seen_prefixes[doc_id] = max(previous, hi-1)
+                queue[0][2] = end
+                if end == len(ids):
+                    queue.popleft()
+            carry = values[-1]
+            rows[row_idx] = torch.tensor(values, dtype=torch.long)
+        cpu_x.copy_(rows[:, :-1])
+        cpu_y.copy_(rows[:, 1:])
+        gpu.copy_(cpu, non_blocking=use_cuda)
+        state = {'pq_idx': pq_idx, 'rg_idx': rg_idx, 'epoch': epoch}
+        if track_data_exposure:
+            state.update(unique_text_tokens=unique_text_tokens, text_tokens=text_tokens)
+        yield x, y, state

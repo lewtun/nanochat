@@ -60,6 +60,7 @@ parser.add_argument("--target-param-data-ratio", type=float, default=12, help="c
 # Optimization
 parser.add_argument("--tokenizer-sha256", default="", help="expected SHA-256 of tokenizer.pkl")
 parser.add_argument("--tokenizer-bucket-path", default="", help="bucket URI of tokenizer.pkl for checkpoint provenance")
+parser.add_argument("--document-eos", action="store_true", help="encode complete documents with BOS and EOS")
 parser.add_argument("--track-data-exposure", action="store_true", help="count distinct text token positions seen; unsupported with resume")
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
@@ -361,8 +362,8 @@ if scaler is not None:
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
 if args.track_data_exposure and resuming:
     raise ValueError("Data exposure tracking does not support resuming")
-train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, track_data_exposure=args.track_data_exposure)
-build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device)
+train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, track_data_exposure=args.track_data_exposure, document_eos=args.document_eos)
+build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device, document_eos=args.document_eos)
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------
@@ -519,6 +520,8 @@ while True:
                 "step": step,
                 "val_bpb": val_bpb, # loss at last step
                 "model_config": model_config_kwargs,
+                "document_eos": args.document_eos,
+                "eos_token_id": tokenizer.encode_special('<|eos|>') if args.document_eos else None,
                 "tokenizer_sha256": args.tokenizer_sha256 or None,
                 "tokenizer_bucket_path": args.tokenizer_bucket_path or None,
                 "user_config": user_config, # inputs to the training script

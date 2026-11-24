@@ -13,16 +13,21 @@ TRACKIO_BUCKET="${TRACKIO_BUCKET:-}"
 TRAIN_IMAGE="${TRAIN_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}"
 TRAIN_FLAVOR="${TRAIN_FLAVOR:-h200x8}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-DATA_PREFIX="${DATA_PREFIX:-base_data_climbmix}"
 ASSET_PREFIX="${ASSET_PREFIX:-}"
-if [[ "$DATA_PREFIX" == "base_data_rh" ]]; then
+if [[ "$ASSET_PREFIX" == "rh" ]]; then
+    DATA_PREFIX="${DATA_PREFIX:-base_data}"
+    MANIFEST_PATH="${MANIFEST_PATH:-data_manifest.json}"
+    DOCUMENT_EOS="${DOCUMENT_EOS:-1}"
     HEAD_DIM="${HEAD_DIM:-64}"
     MIN_STEPS="${MIN_STEPS:-500}"
 else
+    DATA_PREFIX="${DATA_PREFIX:-base_data_climbmix}"
+    MANIFEST_PATH="${MANIFEST_PATH:-${ASSET_PREFIX:+$ASSET_PREFIX/}data_manifest.json}"
+    DOCUMENT_EOS="${DOCUMENT_EOS:-0}"
     HEAD_DIM="${HEAD_DIM:-128}"
     MIN_STEPS="${MIN_STEPS:-0}"
 fi
-export ASSET_PREFIX HEAD_DIM MIN_STEPS
+export ASSET_PREFIX HEAD_DIM MIN_STEPS DOCUMENT_EOS MANIFEST_PATH
 if [[ -z "${CORE_METRIC+x}" ]]; then
     if [[ "$DATA_PREFIX" == "base_data_climbmix" ]]; then CORE_METRIC=1; else CORE_METRIC=0; fi
 fi
@@ -35,7 +40,7 @@ NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
 read -r -a DEPTHS <<< "${DEPTHS:-10 12 14 16 18 20}"
 
-RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,head_dim,asset_prefix,tokenizer_sha256,tokenizer_bucket_path,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,total_batch_size,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
+RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,head_dim,asset_prefix,document_eos,tokenizer_sha256,tokenizer_bucket_path,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,total_batch_size,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -57,7 +62,7 @@ are space-separated. MIN_TOKEN_PARAM_RATIO and MAX_TOKEN_PARAM_RATIO bound
 the estimated grid. Custom data disables CORE unless explicitly enabled.
 
 Example:
-  RUN_LABEL=lean DATA_PREFIX=base_data_rh TRAIN_FLAVOR=h200 NPROC_PER_NODE=1 \
+  RUN_LABEL=lean ASSET_PREFIX=rh TRAIN_FLAVOR=h200 NPROC_PER_NODE=1 \
     FLOPS_BUDGETS="1e15" DEPTHS="2 4" bash runs/scaling_laws_hf.sh
 
 --worker is reserved for the remote Job.
@@ -153,6 +158,9 @@ validate_settings() {
     [[ "$DATA_PREFIX" =~ ^[A-Za-z0-9._-]+$ && "$DATA_PREFIX" != "." && "$DATA_PREFIX" != ".." ]] || die "Invalid DATA_PREFIX"
     [[ -z "$ASSET_PREFIX" || ( "$ASSET_PREFIX" =~ ^[A-Za-z0-9._-]+$ && "$ASSET_PREFIX" != "." && "$ASSET_PREFIX" != ".." ) ]] || die "Invalid ASSET_PREFIX"
     [[ "$HEAD_DIM" =~ ^[1-9][0-9]*$ && "$MIN_STEPS" =~ ^[0-9]+$ ]] || die "Invalid HEAD_DIM or MIN_STEPS"
+    [[ "$DOCUMENT_EOS" == 0 || "$DOCUMENT_EOS" == 1 ]] || die "Invalid DOCUMENT_EOS"
+    [[ "$ASSET_PREFIX" != rh || ( "$DOCUMENT_EOS" == 1 && "$DATA_PREFIX" == base_data && "$HEAD_DIM" == 64 ) ]] || die "RH requires canonical data, EOS, and 64-channel heads"
+    [[ "$MANIFEST_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$MANIFEST_PATH" != *..* && "$MANIFEST_PATH" != /* ]] || die "Invalid MANIFEST_PATH"
     [[ "$CORE_METRIC" == 0 || "$CORE_METRIC" == 1 ]] || die "CORE_METRIC must be 0 or 1"
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
     run_python - "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
@@ -283,13 +291,13 @@ assert bucket in text and mount in text, f"Expected {bucket} mounted at {mount}:
 
 parse_training_log() {
     local log_file="$1" flops_budget="$2" depth="$3" run_name="$4" train_time="$5"
-    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" "$ASSET_PREFIX" "$HEAD_DIM" "${TOKENIZER_SHA256:-}" "${TOKENIZER_BUCKET_PATH:-}" <<'PY'
+    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" "$ASSET_PREFIX" "$HEAD_DIM" "$DOCUMENT_EOS" "${TOKENIZER_SHA256:-}" "${TOKENIZER_BUCKET_PATH:-}" <<'PY'
 import csv
 import math
 import re
 import sys
 
-log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text, asset_prefix, expected_head_dim, tokenizer_sha256, tokenizer_bucket_path = sys.argv[1:]
+log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text, asset_prefix, expected_head_dim, document_eos, tokenizer_sha256, tokenizer_bucket_path = sys.argv[1:]
 text = open(log_path, encoding="utf-8", errors="replace").read()
 
 def last(pattern, label, flags=re.MULTILINE):
@@ -349,6 +357,7 @@ row = [
     width,
     width // heads,
     asset_prefix,
+    document_eos,
     tokenizer_sha256,
     tokenizer_bucket_path,
     *params,
@@ -427,6 +436,8 @@ payload = {
     "data_bucket": os.environ["HF_BUCKET"],
     "asset_prefix": os.environ.get("ASSET_PREFIX", ""),
     "head_dim": int(os.environ["HEAD_DIM"]),
+    "document_eos": os.environ["DOCUMENT_EOS"] == "1",
+    "manifest_path": os.environ["MANIFEST_PATH"],
     "min_steps": int(os.environ["MIN_STEPS"]),
     "data_manifest_git_sha": os.environ.get("DATA_MANIFEST_GIT_SHA", "unknown"),
     "tokenizer_sha256": os.environ["TOKENIZER_SHA256"],
@@ -519,7 +530,7 @@ PY
 stage_training_assets() {
     local runtime_base="$1"
     log "Staging training assets from the mounted bucket into local Job storage"
-    run_python - "$NANOCHAT_MOUNT/${ASSET_PREFIX}" "$runtime_base" "$DATA_PREFIX" <<'PY'
+    run_python - "$NANOCHAT_MOUNT/${ASSET_PREFIX}" "$runtime_base" "$DATA_PREFIX" "$NANOCHAT_MOUNT/$MANIFEST_PATH" <<'PY'
 import json
 import os
 import shutil
@@ -531,7 +542,7 @@ import pyarrow.parquet as pq
 
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
-manifest = json.loads((source / "data_manifest.json").read_text())
+manifest = json.loads(Path(sys.argv[4]).read_text())
 shard_names = manifest["parquet_files"]
 prefix = sys.argv[3]
 
@@ -638,6 +649,9 @@ PYSTEPS
     if [[ "$DATA_PREFIX" != "base_data_climbmix" ]]; then
         train_args+=(--track-data-exposure)
     fi
+    if [[ "$DOCUMENT_EOS" == 1 ]]; then
+        train_args+=(--document-eos)
+    fi
     log "Starting $run_name with $NPROC_PER_NODE-process torchrun"
     start_time="$(date +%s)"
     set +e
@@ -697,14 +711,18 @@ if count != expected:
     raise SystemExit(f"Expected {expected} CUDA devices, found {count}")
 PY
 
-    data_manifest_path="$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}data_manifest.json"
+    data_manifest_path="$NANOCHAT_MOUNT/$MANIFEST_PATH"
     [[ -f "$data_manifest_path" ]] || die "Missing $data_manifest_path"
     DATA_MANIFEST_GIT_SHA="$(validate_data_manifest_stream < "$data_manifest_path")"
-    run_python - "$data_manifest_path" "$DATA_PREFIX" <<'PYDATA'
+    run_python - "$data_manifest_path" "$DATA_PREFIX" "$DOCUMENT_EOS" "$ASSET_PREFIX" <<'PYDATA'
 import json, sys
 manifest = json.load(open(sys.argv[1]))
 if manifest.get("data_prefix", "base_data_climbmix") != sys.argv[2]:
     raise SystemExit("DATA_PREFIX does not match the manifest")
+if bool(manifest.get("document_eos", False)) != (sys.argv[3] == '1'):
+    raise SystemExit("DOCUMENT_EOS does not match the manifest")
+if sys.argv[4] == 'rh' and (manifest.get('asset_prefix') != 'rh' or not manifest.get('tokenizer_sha256')):
+    raise SystemExit('Canonical RH manifest is missing asset prefix or tokenizer fingerprint')
 PYDATA
     TRAIN_CORPUS_TOKENS="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("train", {}).get("tokens", 0))' "$data_manifest_path")"
     TOKENIZER_VOCAB_SIZE="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1]))["tokenizer_vocab_size"])' "$data_manifest_path")"
@@ -712,7 +730,7 @@ PYDATA
     [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl" ]] || die "Missing tokenizer.pkl"
     [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/token_bytes.pt" ]] || die "Missing token_bytes.pt"
     TOKENIZER_BUCKET_PATH="hf://buckets/${HF_BUCKET}/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl"
-    TOKENIZER_SHA256="$(run_python - "$data_manifest_path" "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl" <<'PYSHA'
+    TOKENIZER_SHA256="$(run_python - "$data_manifest_path" "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl" "$TOKENIZER_BUCKET_PATH" <<'PYSHA'
 import hashlib, json, sys
 manifest = json.load(open(sys.argv[1]))
 with open(sys.argv[2], 'rb') as handle:
@@ -720,6 +738,9 @@ with open(sys.argv[2], 'rb') as handle:
 expected = manifest.get('tokenizer_sha256')
 if expected and actual != expected:
     raise SystemExit('Tokenizer hash does not match data manifest')
+expected_path = manifest.get('tokenizer_bucket_path')
+if expected_path and expected_path != sys.argv[3]:
+    raise SystemExit('Tokenizer bucket path does not match data manifest')
 print(actual)
 PYSHA
 )"
@@ -739,6 +760,19 @@ PYSHA
     mkdir -p "$runtime_base/base_checkpoints"
     stage_training_assets "$runtime_base"
     [[ "$(run_python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$runtime_base/tokenizer/tokenizer.pkl")" == "$TOKENIZER_SHA256" ]] || die "Staged tokenizer hash differs from bucket"
+    if [[ "$DOCUMENT_EOS" == 1 ]]; then
+        run_python - "$runtime_base/tokenizer" <<'PYEOS'
+import pickle, sys, torch
+from pathlib import Path
+p = Path(sys.argv[1]); enc = pickle.load(open(p/'tokenizer.pkl', 'rb'))
+special = enc._special_tokens
+if '<|eos|>' not in special:
+    raise SystemExit('Canonical tokenizer does not contain EOS')
+byte_lengths = torch.load(p/'token_bytes.pt', map_location='cpu', weights_only=True)
+if any(int(byte_lengths[i]) != 0 for i in special.values()):
+    raise SystemExit('Special token has nonzero byte count')
+PYEOS
+    fi
 
     for flops_budget in "${FLOPS_BUDGETS[@]}"; do
         for depth in "${DEPTHS[@]}"; do
@@ -798,6 +832,8 @@ launcher_main() {
         --env "NANOCHAT_MOUNT=$NANOCHAT_MOUNT"
         --env "DATA_PREFIX=$DATA_PREFIX"
         --env "ASSET_PREFIX=$ASSET_PREFIX"
+        --env "MANIFEST_PATH=$MANIFEST_PATH"
+        --env "DOCUMENT_EOS=$DOCUMENT_EOS"
         --env "HEAD_DIM=$HEAD_DIM"
         --env "MIN_STEPS=$MIN_STEPS"
         --env "CORE_METRIC=$CORE_METRIC"
@@ -813,7 +849,7 @@ launcher_main() {
 
     assert_pushed_sha "$git_sha"
     hf_cli auth whoami >/dev/null
-    manifest_git_sha="$(hf_cli buckets cp "hf://buckets/${HF_BUCKET}/${ASSET_PREFIX:+$ASSET_PREFIX/}data_manifest.json" - | validate_data_manifest_stream)"
+    manifest_git_sha="$(hf_cli buckets cp "hf://buckets/${HF_BUCKET}/${MANIFEST_PATH}" - | validate_data_manifest_stream)"
     log "Validated data manifest created by $manifest_git_sha"
 
     active_jobs="$(hf_cli jobs ps --namespace "$HF_NAMESPACE" --label pipeline=nanochat-scaling-laws --label "run_label=$RUN_LABEL" --format json)"

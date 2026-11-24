@@ -5,6 +5,8 @@ segment starts a new context; every text token is scored once, with no padding
 included in the loss or byte denominator.
 """
 import argparse
+import hashlib
+import os
 from collections import defaultdict
 import json
 import math
@@ -13,6 +15,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import torch
 from nanochat.checkpoint_manager import build_model, find_last_step
+from nanochat.common import get_base_dir
 from scripts.prepare_rh_data import area
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -38,6 +41,15 @@ for checkpoint in args.checkpoints:
     step = find_last_step(str(checkpoint))
     device = torch.device(args.device)
     model, tokenizer, meta = build_model(str(checkpoint), step, device, 'eval')
+    tokenizer_dir = Path(os.environ.get('NANOCHAT_TOKENIZER_DIR', Path(get_base_dir()) / 'tokenizer'))
+    actual_sha = hashlib.sha256((tokenizer_dir / 'tokenizer.pkl').read_bytes()).hexdigest()
+    if actual_sha != manifest.get('tokenizer_sha256') or actual_sha != meta.get('tokenizer_sha256'):
+        raise ValueError(f'{checkpoint}: tokenizer hash does not match both manifest and checkpoint')
+    if meta.get('tokenizer_bucket_path') != manifest.get('tokenizer_bucket_path'):
+        raise ValueError(f'{checkpoint}: tokenizer bucket path does not match manifest')
+    if not manifest.get('document_eos') or not meta.get('user_config', {}).get('document_eos'):
+        raise ValueError(f'{checkpoint}: expected the canonical document-EOS setup')
+    eos = tokenizer.encode_special('<|eos|>')
     seq_len = model.config.sequence_len
     stats = defaultdict(lambda: {'nats': 0.0, 'bytes': 0, 'tokens': 0, 'documents': 0})
     index = 0
@@ -47,13 +59,14 @@ for checkpoint in args.checkpoints:
                 path = paths[index]
                 index += 1
                 row = stats[area(Path(path))]
-                ids = [tokenizer.get_bos_token_id()] + tokenizer.encode(text)
+                text_ids = tokenizer.encode(text)
+                ids = [tokenizer.get_bos_token_id()] + text_ids + [eos]
                 row['bytes'] += len(text.encode('utf-8'))
-                row['tokens'] += len(ids) - 1
+                row['tokens'] += len(text_ids)
                 row['documents'] += 1
                 for start in range(0, len(ids)-1, seq_len):
                     segment = ids[start:start+seq_len+1]
-                    inputs, targets = segment[:-1], segment[1:]
+                    inputs, targets = segment[:-1], [(-1 if token == eos else token) for token in segment[1:]]
                     if len(inputs) == 1:  # model's smear path requires T > 1
                         inputs.append(tokenizer.get_bos_token_id())
                         targets.append(-1)
@@ -63,7 +76,8 @@ for checkpoint in args.checkpoints:
     for row in stats.values():
         row['bits_per_byte'] = row['nats'] / (math.log(2) * row['bytes']) if row['bytes'] else None
     payload = {'checkpoint': checkpoint.name, 'step': step, 'sequence_length': seq_len,
-               'method': 'document BOS, nonoverlapping context windows',
+               'method': 'document BOS/text/EOS, nonoverlapping context windows; EOS excluded from BPB',
+               'tokenizer_sha256': actual_sha, 'tokenizer_bucket_path': meta['tokenizer_bucket_path'],
                'uncovered_areas': manifest['uncovered_areas'], 'file_level_areas': manifest.get('file_level_areas', {}), 'areas': dict(sorted(stats.items()))}
     temporary = destination.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(payload, indent=2) + '\n')

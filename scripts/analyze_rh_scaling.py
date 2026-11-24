@@ -1,4 +1,4 @@
-"""Analyze RH results. Run: uv run --extra cpu --with scipy --with matplotlib python -m scripts.analyze_rh_scaling --results ... --output-dir ...
+"""Analyze RH results. Run: uv run --extra cpu --with scipy --with matplotlib python -m scripts.analyze_rh_scaling --manifest ... --results ... --output-dir ...
 
 The fitted loss follows Muennighoff et al., https://arxiv.org/abs/2305.16264,
 with N and D expressed in millions; bpB is the fitted loss. Estimates from
@@ -16,18 +16,26 @@ from scipy.optimize import least_squares
 from nanochat.scaling import fit_local_isoflop
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--manifest', type=Path, required=True, help='canonical data manifest')
 parser.add_argument('--results', type=Path, nargs='+', required=True)
 parser.add_argument('--output-dir', type=Path, required=True)
 parser.add_argument('--area-dir', type=Path, help='directory of per-checkpoint area evaluation JSON files')
-parser.add_argument('--asset-prefix', default='rh_v2', help='only analyze runs using this dataset and tokenizer version')
+parser.add_argument('--asset-prefix', default='rh', help='only analyze runs using this dataset and tokenizer version')
 parser.add_argument('--head-dim', type=int, default=64)
 args = parser.parse_args()
+manifest = json.loads(args.manifest.read_text())
+if not manifest.get('document_eos') or manifest.get('asset_prefix') != args.asset_prefix:
+    raise ValueError('Manifest does not describe the canonical EOS dataset')
+expected_sha = manifest['tokenizer_sha256']
+expected_path = manifest['tokenizer_bucket_path']
 rows = []
 for path in args.results:
     with path.open() as f:
         for r in csv.DictReader(f):
-            if r.get('asset_prefix') != args.asset_prefix or r.get('head_dim') != str(args.head_dim):
-                raise ValueError(f'{path}: result does not match asset prefix {args.asset_prefix!r} and head dimension {args.head_dim}; do not mix experiments')
+            if (r.get('asset_prefix') != args.asset_prefix or r.get('head_dim') != str(args.head_dim)
+                    or r.get('document_eos') != '1' or r.get('tokenizer_sha256') != expected_sha
+                    or r.get('tokenizer_bucket_path') != expected_path):
+                raise ValueError(f'{path}: result does not match canonical EOS tokenizer and architecture; do not mix experiments')
             if int(r['model_dim']) != int(r['depth']) * 64 or int(r['num_iterations']) < 500:
                 raise ValueError(f'{path}: incompatible model width or fewer than 500 optimizer steps')
             rows.append({k: float(r[k]) for k in ('flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb')})
@@ -123,10 +131,9 @@ area_plot=False
 if args.area_dir:
     area_files=sorted(args.area_dir.glob('*.json'))
     payloads=[json.loads(p.read_text()) for p in area_files]
-    if args.asset_prefix == 'rh_v2':
-        expected = {'(root)', 'Formalism', 'Development/ResolutionOfSingularities'}
-        if any(set(p.get('file_level_areas', {})) != expected for p in payloads):
-            raise ValueError('Area results do not match the revised split; do not mix old and revised evaluations')
+    expected_areas = set(manifest.get('file_level_areas', {}))
+    if any(set(p.get('file_level_areas', {})) != expected_areas or p.get('tokenizer_sha256') != expected_sha for p in payloads):
+        raise ValueError('Area results do not match the canonical tokenizer and split')
     if payloads:
         areas=sorted({name for p in payloads for name in p['areas']})
         matrix=np.array([[p['areas'].get(a,{}).get('bits_per_byte',np.nan) for p in payloads] for a in areas],dtype=float)

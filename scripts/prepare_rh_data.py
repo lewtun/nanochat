@@ -1,9 +1,10 @@
 """Prepare a deterministic, directory-held-out Lean corpus for nanochat.
 
 Run with --source .../lean/src --output .../runtime, then train the tokenizer:
-NANOCHAT_BASE_DIR=.../runtime NANOCHAT_DATA_DIR=.../runtime/base_data_rh \
-  python -m scripts.tok_train --vocab-size 16384
-Finally run this script with --count-tokens to add tokenizer counts to the manifest.
+NANOCHAT_BASE_DIR=.../runtime NANOCHAT_DATA_DIR=.../runtime/base_data \
+  python -m scripts.tok_train --vocab-size 16384 --document-eos
+Finally run this script with --count-tokens --bucket namespace/name to add
+counts, fingerprints and canonical bucket paths to the manifest.
 """
 import argparse
 import hashlib
@@ -25,6 +26,8 @@ def prepare(source, output, seed, shard_size):
     manifest_path = output / 'data_manifest.json'
     if manifest_path.exists():
         old = json.loads(manifest_path.read_text())
+        if not old.get('document_eos') or old.get('asset_prefix') != 'rh' or old.get('data_prefix') != 'base_data':
+            raise ValueError('Existing data is not the canonical EOS layout; use a fresh output directory')
         if 'file_level_areas' not in old:
             raise ValueError('Existing data uses the older split; use a fresh output directory')
         if old.get('seed') != seed or old.get('shard_size') != shard_size:
@@ -60,7 +63,7 @@ def prepare(source, output, seed, shard_size):
     train = [f for f in files if f.parent not in held and f not in held_files]
     val = [f for f in files if f.parent in held or f in held_files]
     random.Random(seed).shuffle(train)
-    data = output / 'base_data_rh'
+    data = output / 'base_data'
     data.mkdir(parents=True, exist_ok=True)
     if any(data.glob('*.parquet')):
         raise FileExistsError(f'{data} already contains shards; use a fresh output directory')
@@ -75,7 +78,7 @@ def prepare(source, output, seed, shard_size):
     def stats(items):
         return {'files': len(items), 'bytes': sum(f.stat().st_size for f in items)}
     manifest = {'schema_version': 1, 'status': 'PREPARED', 'dataset': 'alpo.ge/lean',
-                'seed': seed, 'shard_size': shard_size, 'data_prefix': 'base_data_rh', 'parquet_files': names,
+                'seed': seed, 'shard_size': shard_size, 'asset_prefix': 'rh', 'data_prefix': 'base_data', 'document_eos': True, 'parquet_files': names,
                 'num_train_shards': len(names)-1, 'validation_shard': name,
                 'held_out_directories': sorted(str(d.relative_to(source)) for d in held),
                 'validation_files': [str(f.relative_to(source)) for f in val],
@@ -97,7 +100,7 @@ def write(path, files):
         writer.close()
 
 
-def count(output):
+def count(output, bucket):
     from nanochat.tokenizer import RustBPETokenizer
     tokenizer = RustBPETokenizer.from_directory(output / 'tokenizer')
     path = output / 'data_manifest.json'
@@ -110,9 +113,18 @@ def count(output):
                 tokens += sum(len(ids) for ids in tokenizer.encode(batch.column(0).to_pylist()))
             print(f'{split} {name}: {tokens:,} tokens', flush=True)
         manifest[split]['tokens'] = tokens
+        if manifest.get('document_eos'):
+            manifest[split]['tokens_with_boundaries'] = tokens + 2 * manifest[split]['files']
         manifest[split]['bytes_per_token'] = manifest[split]['bytes'] / tokens
+    if manifest.get('document_eos') and '<|eos|>' not in tokenizer.get_special_tokens():
+        raise ValueError('Document-EOS manifest requires an EOS tokenizer')
+    manifest['tokenizer_special_tokens'] = sorted(tokenizer.get_special_tokens())
+    if manifest.get('document_eos'):
+        manifest['eos_token_id'] = tokenizer.encode_special('<|eos|>')
     manifest['tokenizer_sha256'] = hashlib.sha256((output / 'tokenizer' / 'tokenizer.pkl').read_bytes()).hexdigest()
     manifest['tokenizer_relative_path'] = 'tokenizer/tokenizer.pkl'
+    manifest['tokenizer_bucket_path'] = f'hf://buckets/{bucket}/rh/tokenizer/tokenizer.pkl'
+    manifest['data_bucket_path'] = f'hf://buckets/{bucket}/rh/base_data'
     manifest['tokenizer_vocab_size'] = tokenizer.get_vocab_size()
     manifest['status'] = 'COMPLETE'
     path.write_text(json.dumps(manifest, indent=2) + '\n')
@@ -125,9 +137,12 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--shard-size', type=int, default=10000)
     parser.add_argument('--count-tokens', action='store_true')
+    parser.add_argument('--bucket', help='namespace/bucket for canonical manifest paths')
     args = parser.parse_args()
     if args.count_tokens:
-        count(args.output)
+        if not args.bucket or args.bucket.count('/') != 1 or any(c.isspace() for c in args.bucket):
+            parser.error('--bucket namespace/name is required with --count-tokens')
+        count(args.output, args.bucket)
     else:
         if args.source is None or args.shard_size <= 0:
             parser.error('--source and positive --shard-size required')
