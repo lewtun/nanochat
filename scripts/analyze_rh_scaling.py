@@ -272,6 +272,7 @@ card=['## Scaling-law results','','We trained on the Lean corpus with held-out s
 if manifest.get('train') and manifest.get('validation'):
     train, val = manifest['train'], manifest['validation']
     card += [f"The training split contains {train['files']:,} documents and {train['tokens']:,} text tokens. Matched validation contains {val['files']:,} documents. The train–validation area distribution has total-variation distance {manifest['train_validation_area_tv']:.3f}.", '']
+    card += ['Matched validation samples eligible whole leaves, so it underrepresents large leaves and files outside leaf directories within an area. Matching the area distribution does not remove this within-area sampling limitation.', '']
 if args.diagnostics:
     diagnostics = json.loads(args.diagnostics.read_text())
     seed = diagnostics['seed_comparison']
