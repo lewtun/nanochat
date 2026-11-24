@@ -41,12 +41,15 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
         old = json.loads(manifest_path.read_text())
         if not old.get('document_eos') or old.get('asset_prefix') != 'rh' or old.get('data_prefix') != 'base_data':
             raise ValueError('Existing data is not the canonical EOS layout; use a fresh output directory')
-        if 'file_level_areas' not in old:
-            raise ValueError('Existing data uses the older split; use a fresh output directory')
+        if not all(key in old for key in ('file_level_areas', 'area_evaluation_set', 'difficulty_shard', 'unseen_shard')):
+            raise ValueError('Existing data uses an older split; use a fresh output directory')
         if old.get('seed') != seed or old.get('shard_size') != shard_size:
             raise ValueError('Existing manifest has different preparation settings')
         if not all((output / old['data_prefix'] / name).is_file() for name in old['parquet_files']):
             raise FileNotFoundError('Existing manifest has missing shards')
+        for split in ('unseen', 'difficulty'):
+            if not (output / old[split + '_data_prefix'] / old[split + '_shard']).is_file():
+                raise FileNotFoundError(f'Existing manifest has missing {split} shard')
         print(f'Using existing prepared data: {manifest_path}')
         return
     files = sorted(source.rglob('*.lean'))
