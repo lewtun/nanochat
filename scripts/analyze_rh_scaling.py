@@ -30,10 +30,11 @@ args.output_dir.mkdir(parents=True, exist_ok=True)
 optimal = []
 for budget in sorted({r['flops_budget'] for r in rows}):
     group = sorted((r for r in rows if r['flops_budget'] == budget), key=lambda r:r['effective_params'])
-    if len(group) < 3:
-        raise ValueError(f'{budget:g}: need at least three distinct model sizes')
+    if len(group) < 5:
+        raise ValueError(f'{budget:g}: need at least five distinct model sizes')
     x = np.log10([r['effective_params'] for r in group]); y = [r['val_bpb'] for r in group]
     if len(set(x)) != len(x): raise ValueError(f'{budget:g}: duplicate parameter counts')
+    if np.argmin(y) in (0, len(y)-1): raise ValueError(f'{budget:g}: observed minimum is not bracketed')
     a,b,c = np.polyfit(x,y,2)
     if a <= 0 or not x[0] < -b/(2*a) < x[-1]:
         raise ValueError(f'{budget:g}: fitted minimum is not bracketed')
