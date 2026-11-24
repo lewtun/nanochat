@@ -307,7 +307,9 @@ val_bpb = finite(r"Validation bpb:\s+([0-9.eE+-]+)", "validation BPB", positive=
 core_matches = re.findall(r"CORE metric:\s+([0-9.eE+-]+)", text)
 core_score = float(core_matches[-1]) if core_matches else None
 throughput = integer(r"tok/sec:\s+([\d,]+)", "throughput")
-mfu = finite(r"bf16_mfu:\s+([0-9.eE+-]+)", "MFU", positive=True)
+mfu = finite(r"bf16_mfu:\s+([0-9.eE+-]+)", "MFU")
+if mfu < 0:
+    raise SystemExit(f"Negative MFU in {log_path}")
 depth = int(depth_text)
 train_time = int(train_time_text)
 if any(value <= 0 for value in params) or num_iterations <= 0 or batch_size <= 0 or throughput <= 0 or train_time < 0:
