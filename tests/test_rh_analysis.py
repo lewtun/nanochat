@@ -32,3 +32,36 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     card = (output / 'model_card_results.md').read_text()
     assert '100 documents and 1,000 text tokens' in card
     assert 'total-variation distance 0.030' in card
+
+
+def test_recovers_identifiable_data_constrained_law(tmp_path):
+    import math
+    import pytest
+    manifest = {'document_eos': True, 'asset_prefix': 'rh', 'tokenizer_sha256': 'abc', 'tokenizer_bucket_path': 'bucket/tokenizer'}
+    manifest_path = tmp_path / 'manifest.json'
+    manifest_path.write_text(json.dumps(manifest))
+    fields = ['asset_prefix', 'head_dim', 'document_eos', 'tokenizer_sha256', 'tokenizer_bucket_path', 'batch_lr_scale', 'weight_decay_scaled', 'validation_mode', 'model_dim', 'depth', 'num_iterations', 'flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb']
+    path = tmp_path / 'rows.csv'
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for compute in (1e15, 1e16, 1e17, 1e18, 1e19):
+            for depth in range(1, 13):
+                n = 1e6 * 2**(depth-1)
+                d = compute / (6*n)
+                u = min(100e6, d)
+                nm, dm, um = n/1e6, d/1e6, u/1e6
+                A, B, alpha, beta, E, rd_star, rn_star = 3., 2., .4, .3, .2, 3., 5.
+                un = min(nm, (alpha*A/(beta*B))**(1/alpha) * um**(beta/alpha))
+                rn, rd = nm/un-1, dm/um-1
+                ne = un * (1+rn_star*(-math.expm1(-rn/rn_star)))
+                de = um * (1+rd_star*(-math.expm1(-rd/rd_star)))
+                loss = A/ne**alpha+B/de**beta+E
+                writer.writerow(dict(asset_prefix='rh', head_dim=64, document_eos=1, tokenizer_sha256='abc', tokenizer_bucket_path='bucket/tokenizer', batch_lr_scale=.3, weight_decay_scaled=.2, validation_mode='full_documents', model_dim=64*depth, depth=depth, num_iterations=500, flops_budget=compute, effective_params=n, tokens_trained=d, text_tokens_trained=d, unique_tokens=u, passes=d/100e6, repeat_factor=d/u, val_bpb=loss))
+    output = tmp_path / 'output'
+    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output)], check=True, timeout=60)
+    result = json.loads((output / 'fits.json').read_text())['data_constrained']
+    assert result['status'] == 'fit'
+    assert result['parameters'] == pytest.approx({'A': 3, 'B': 2, 'alpha': .4, 'beta': .3, 'E': .2, 'R_D_star': 3, 'R_N_star': 5}, rel=1e-4)
+    assert result['jacobian_condition'] < 1e8
+    assert result['standard_errors'] is not None
