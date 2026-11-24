@@ -36,6 +36,9 @@ MIN_TOKEN_PARAM_RATIO="${MIN_TOKEN_PARAM_RATIO:-0.25}"
 MAX_TOKEN_PARAM_RATIO="${MAX_TOKEN_PARAM_RATIO:-1000}"
 export DATA_PREFIX EVAL_TOKENS CORE_METRIC MIN_TOKEN_PARAM_RATIO MAX_TOKEN_PARAM_RATIO NPROC_PER_NODE
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
+TRAIN_SEED="${TRAIN_SEED:-42}"
+EFFICIENT_BATCH="${EFFICIENT_BATCH:-1}"
+export TRAIN_SEED EFFICIENT_BATCH
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
@@ -465,6 +468,8 @@ payload = {
     "document_eos": os.environ["DOCUMENT_EOS"] == "1",
     "manifest_path": os.environ["MANIFEST_PATH"],
     "min_steps": int(os.environ["MIN_STEPS"]),
+    "train_seed": int(os.environ["TRAIN_SEED"]),
+    "efficient_batch": os.environ["EFFICIENT_BATCH"] == "1",
     "data_prefix": os.environ["DATA_PREFIX"],
     "eval_tokens": int(os.environ["EVAL_TOKENS"]),
     "core_metric": os.environ["CORE_METRIC"] == "1",
@@ -483,7 +488,8 @@ payload = {
 if target.exists():
     old = json.loads(target.read_text())
     keys = ("asset_prefix", "data_prefix", "head_dim", "min_steps", "document_eos", "eval_tokens",
-            "nproc_per_node", "tokenizer_sha256", "tokenizer_bucket_path", "core_metric", "git_sha")
+            "nproc_per_node", "tokenizer_sha256", "tokenizer_bucket_path", "core_metric", "git_sha",
+            "train_seed", "efficient_batch", "data_manifest_git_sha")
     changed = [key for key in keys if old.get(key) != payload[key]]
     if changed:
         raise SystemExit(f"Existing label has incompatible provenance: {', '.join(changed)}; use a new label")
@@ -517,7 +523,7 @@ import sys
 path, flops, depth = sys.argv[1:]
 with open(path, newline="") as handle:
     rows = csv.DictReader(handle)
-    if any(row["flops_budget"] == flops and row["depth"] == depth for row in rows):
+    if any(float(row["flops_budget"]) == float(flops) and int(row["depth"]) == int(depth) for row in rows):
         raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -710,12 +716,16 @@ PYSTEPS
     if [[ "$DOCUMENT_EOS" == 1 ]]; then
         train_args+=(--document-eos)
     fi
+    if [[ "$EFFICIENT_BATCH" == 0 ]]; then
+        train_args+=(--no-efficient-batch)
+    fi
     log "Starting $run_name with $NPROC_PER_NODE-process torchrun"
     start_time="$(date +%s)"
     set +e
     NANOCHAT_BASE_DIR="$runtime_base" NANOCHAT_DATA_DIR="$runtime_base/$DATA_PREFIX" OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" -m scripts.base_train -- \
         --depth="$depth" \
         --head-dim="$HEAD_DIM" \
+        --seed="$TRAIN_SEED" \
         --min-steps="$MIN_STEPS" \
         --tokenizer-sha256="$TOKENIZER_SHA256" \
         --tokenizer-bucket-path="$TOKENIZER_BUCKET_PATH" \
@@ -909,6 +919,8 @@ launcher_main() {
         --env "DOCUMENT_EOS=$DOCUMENT_EOS"
         --env "HEAD_DIM=$HEAD_DIM"
         --env "MIN_STEPS=$MIN_STEPS"
+        --env "TRAIN_SEED=$TRAIN_SEED"
+        --env "EFFICIENT_BATCH=$EFFICIENT_BATCH"
         --env "CORE_METRIC=$CORE_METRIC"
         --env "EVAL_TOKENS=$EVAL_TOKENS"
         --env "MIN_TOKEN_PARAM_RATIO=$MIN_TOKEN_PARAM_RATIO"

@@ -45,6 +45,7 @@ parser = argparse.ArgumentParser(description="Pretrain base model")
 parser.add_argument("--run", type=str, default="dummy", help="Trackio run name ('dummy' disables experiment tracking)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--seed", type=int, default=42, help="model initialization seed")
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
@@ -66,6 +67,7 @@ parser.add_argument("--track-data-exposure", action="store_true", help="count di
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
 parser.add_argument("--min-steps", type=int, default=0, help="cap automatic batch to target at least this many FLOP-budget optimizer steps (0 disables)")
+parser.add_argument("--no-efficient-batch", action="store_true", help="retain historical automatic batch rounding for controlled comparisons")
 parser.add_argument("--embedding-lr", type=float, default=0.3, help="learning rate for embedding parameters (Adam)")
 parser.add_argument("--unembedding-lr", type=float, default=0.008, help="learning rate for unembedding parameters (Adam)")
 parser.add_argument("--weight-decay", type=float, default=0.28, help="cautious weight decay for the Muon optimizer (for weights)")
@@ -95,6 +97,9 @@ user_config = vars(args).copy()  # for logging
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+torch.manual_seed(args.seed)
+if device_type == 'cuda':
+    torch.cuda.manual_seed(args.seed)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -275,9 +280,8 @@ num_params = param_counts['total']
 num_flops_per_token = model.estimate_flops()
 print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
-# 1) Use scaling laws to determine the optimal training horizon in tokens
-# The compute-optimal models satisfy the Tokens:Params ratio of --target-param-data-ratio (derived experimentally via scaling laws analysis).
-# We've already initialized the model so we have Params. Optimal Tokens is now simply target-param-data-ratio * Params
+# 1) Use the FLOP-selected horizon, or the target tokens:parameters ratio when
+# the training horizon is selected by that ratio instead.
 def get_scaling_params(m):
     # As for which params to use exactly, transformer matrices + lm_head gives cleanest scaling laws (see dev/LOG.md Jan 27, 2026)
     params_counts = m.num_scaling_params()
@@ -317,7 +321,14 @@ if total_batch_size == -1:
     total_batch_size = max(total_batch_size, minimum_batch)
     if total_batch_size % minimum_batch:
         total_batch_size = (total_batch_size // minimum_batch) * minimum_batch
-    device_batch = compatible_device_batch(total_batch_size, args.max_seq_len, ddp_world_size, args.device_batch_size)
+    if args.min_steps > 0 and not args.no_efficient_batch:
+        from nanochat.scaling import efficient_auto_batch
+        original_batch = total_batch_size
+        total_batch_size, device_batch = efficient_auto_batch(total_batch_size, args.max_seq_len, ddp_world_size, args.device_batch_size)
+        if total_batch_size != original_batch:
+            print0(f"Adjusted automatic batch for efficient microbatches: {original_batch:,} -> {total_batch_size:,} tokens")
+    else:
+        device_batch = compatible_device_batch(total_batch_size, args.max_seq_len, ddp_world_size, args.device_batch_size)
     if device_batch != args.device_batch_size:
         print0(f"Reducing device batch size from {args.device_batch_size} to {device_batch} to fit the automatic total batch")
         args.device_batch_size = device_batch

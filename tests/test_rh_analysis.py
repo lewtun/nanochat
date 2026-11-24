@@ -32,6 +32,9 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     card = (output / 'model_card_results.md').read_text()
     assert '100 documents and 1,000 text tokens' in card
     assert 'total-variation distance 0.030' in card
+    duplicate = subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), str(path), '--output-dir', str(output)], capture_output=True, text=True, timeout=60)
+    assert duplicate.returncode != 0
+    assert 'Duplicate budget/depth' in duplicate.stderr
 
 
 def test_recovers_identifiable_data_constrained_law(tmp_path):
@@ -65,3 +68,5 @@ def test_recovers_identifiable_data_constrained_law(tmp_path):
     assert result['parameters'] == pytest.approx({'A': 3, 'B': 2, 'alpha': .4, 'beta': .3, 'E': .2, 'R_D_star': 3, 'R_N_star': 5}, rel=1e-4)
     assert result['jacobian_condition'] < 1e8
     assert result['standard_errors'] is not None
+    assert result['bound_likelihood_ratios']['R_D_star'] > 3.84
+    assert result['bound_likelihood_ratios']['R_N_star'] > 3.84

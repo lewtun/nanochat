@@ -36,6 +36,25 @@ def atomic_manifest(path, payload):
 
 
 def prepare(source, output, seed, shard_size, source_tarball=None):
+    git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parent, text=True).strip()
+    files = sorted(source.rglob('*.lean'))
+    if not files:
+        raise ValueError('No Lean files found')
+    def update_file(digest, path):
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+    source_hash = hashlib.sha256()
+    for file in files:
+        source_hash.update(str(file.relative_to(source)).encode() + b'\0')
+        update_file(source_hash, file)
+        source_hash.update(b'\0')
+    tree_sha = source_hash.hexdigest()
+    source_sha = None
+    if source_tarball:
+        digest = hashlib.sha256()
+        update_file(digest, source_tarball)
+        source_sha = digest.hexdigest()
     manifest_path = output / 'data_manifest.json'
     if manifest_path.exists():
         old = json.loads(manifest_path.read_text())
@@ -45,6 +64,8 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
             raise ValueError('Existing data uses an older split; use a fresh output directory')
         if old.get('seed') != seed or old.get('shard_size') != shard_size:
             raise ValueError('Existing manifest has different preparation settings')
+        if old.get('source_tree_sha256') != tree_sha or (source_tarball and old.get('source_tarball_sha256') != source_sha):
+            raise ValueError('Existing manifest lacks a matching source fingerprint; use a fresh output directory')
         if not all((output / old['data_prefix'] / name).is_file() for name in old['parquet_files']):
             raise FileNotFoundError('Existing manifest has missing shards')
         for split in ('unseen', 'difficulty'):
@@ -52,9 +73,6 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
                 raise FileNotFoundError(f'Existing manifest has missing {split} shard')
         print(f'Using existing prepared data: {manifest_path}')
         return
-    files = sorted(source.rglob('*.lean'))
-    if not files:
-        raise ValueError('No Lean files found')
     dirs = {f.parent for f in files}
     ancestors = {parent for directory in dirs for parent in directory.parents}
     leaves = dirs - ancestors
@@ -136,11 +154,6 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
     write(difficulty_data / 'difficulty.parquet', difficulty)
     def stats(items):
         return {'files': len(items), 'bytes': sum(f.stat().st_size for f in items)}
-    git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parent, text=True).strip()
-    source_sha = None
-    if source_tarball:
-        with source_tarball.open('rb') as handle:
-            source_sha = hashlib.file_digest(handle, 'sha256').hexdigest()
     per_area = {name: {'train_bytes': 0, 'validation_bytes': 0, 'unseen_bytes': 0, 'difficulty_bytes': 0} for name in area_bytes}
     for group, items in [('train', train), ('validation', val), ('unseen', unseen), ('difficulty', difficulty)]:
         for f in items:
@@ -150,7 +163,7 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
         raise ValueError('Matched split requires nonempty training and validation data')
     tv = 0.5 * sum(abs(v['train_bytes']/train_bytes - v['validation_bytes']/val_bytes) for v in per_area.values())
     manifest = {'schema_version': 1, 'status': 'PREPARED', 'dataset': 'alpo.ge/lean',
-                'git_sha': git_sha, 'source_tarball_sha256': source_sha,
+                'git_sha': git_sha, 'source_tarball_sha256': source_sha, 'source_tree_sha256': tree_sha,
                 'excluded_duplicate_train_files': [str(f.relative_to(source)) for f in duplicates],
                 'seed': seed, 'shard_size': shard_size, 'asset_prefix': 'rh', 'data_prefix': 'base_data', 'document_eos': True, 'parquet_files': names,
                 'num_train_shards': len(names)-1, 'validation_shard': name,

@@ -37,6 +37,20 @@ def compatible_device_batch(total_batch, sequence_len, world_size, limit):
     return device_batch
 
 
+def efficient_auto_batch(total_batch, sequence_len, world_size, limit):
+    """Slightly reduce a budget-capped batch to avoid tiny microbatches."""
+    unit = sequence_len * world_size
+    count = total_batch // unit
+    if total_batch % unit or count < 1 or limit < 1:
+        raise ValueError("Invalid distributed batch")
+    threshold = min(limit, count) / 2
+    for candidate in range(count, max(1, math.floor(.97 * count)) - 1, -1):
+        device = compatible_device_batch(candidate * unit, sequence_len, world_size, limit)
+        if device >= threshold:
+            return candidate * unit, device
+    return total_batch, compatible_device_batch(total_batch, sequence_len, world_size, limit)
+
+
 def fit_local_isoflop(params, losses):
     """Fit exactly two neighbors on either side of the observed minimum."""
     import numpy as np

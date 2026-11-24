@@ -34,6 +34,10 @@ def test_leaf_split_with_three_file_level_fallbacks_is_rerunnable(tmp_path):
     assert set(manifest['validation_files']).isdisjoint(manifest['unseen_files'])
     prepare(source, out, 42, 3)
     assert (out / 'data_manifest.json').read_text() == original
+    import pytest
+    (source / names[0]).write_text('changed source')
+    with pytest.raises(ValueError, match='source fingerprint'):
+        prepare(source, out, 42, 3)
 
 
 def test_validation_content_is_removed_from_training(tmp_path):

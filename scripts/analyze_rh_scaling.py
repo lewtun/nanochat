@@ -2,7 +2,7 @@
 
 The fitted loss follows Muennighoff et al., https://arxiv.org/abs/2305.16264,
 with N and D expressed in millions; bpB is the fitted loss. Estimates from
-unbracketed minima and underdetermined fits are explicitly rejected.
+unbracketed minima are rejected; weakly identified fits are reported as such.
 """
 import argparse
 import csv
@@ -23,14 +23,17 @@ parser.add_argument('--output-dir', type=Path, required=True)
 parser.add_argument('--area-dir', type=Path, help='directory of per-checkpoint area evaluation JSON files')
 parser.add_argument('--asset-prefix', default='rh', help='only analyze runs using this dataset and tokenizer version')
 parser.add_argument('--head-dim', type=int, default=64)
+parser.add_argument('--noise-sigma', type=float, default=0, help='independently measured BPB noise floor (pooled with residual estimate conservatively)')
 args = parser.parse_args()
+if not np.isfinite(args.noise_sigma) or args.noise_sigma < 0:
+    parser.error('--noise-sigma must be finite and nonnegative')
 manifest = json.loads(args.manifest.read_text())
 if not manifest.get('document_eos') or manifest.get('asset_prefix') != args.asset_prefix:
     raise ValueError('Manifest does not describe the canonical EOS dataset')
 expected_sha = manifest['tokenizer_sha256']
 expected_path = manifest['tokenizer_bucket_path']
 rows = []
-eval_settings = set()
+seen_points = {}
 for path in args.results:
     with path.open() as f:
         for r in csv.DictReader(f):
@@ -42,18 +45,37 @@ for path in args.results:
                 raise ValueError(f'{path}: obsolete run predates FLOP-horizon optimizer correction')
             if r.get('validation_mode') != 'full_documents':
                 raise ValueError(f'{path}: RH analysis requires one full document validation pass')
-            eval_settings.add(r['validation_mode'])
             if int(r['model_dim']) != int(r['depth']) * 64 or int(r['num_iterations']) < 500:
                 raise ValueError(f'{path}: incompatible model width or fewer than 500 optimizer steps')
-            rows.append({k: float(r[k]) for k in ('flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb')})
-if len(eval_settings) > 1:
-    raise ValueError('Evaluation token budget and process count differ across runs')
+            point = (float(r['flops_budget']), int(r['depth']))
+            name = r.get('run_name') or f'{path}:depth={r["depth"]}'
+            if point in seen_points:
+                raise ValueError(f'Duplicate budget/depth {point}: {seen_points[point]} and {name}')
+            seen_points[point] = name
+            row = {k: float(r[k]) for k in ('flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb')}
+            row['run_name'] = name
+            rows.append(row)
 if not rows:
     raise SystemExit('No results')
 args.output_dir.mkdir(parents=True, exist_ok=True)
 optimal = []
 bootstrap_optima = {}
 budget_status = {}
+# Pool local residual variance using the two residual degrees of freedom per
+# quadratic. Five residuals alone underestimate the observation noise.
+pooled_ss, pooled_df = 0.0, 0
+for budget in sorted({r['flops_budget'] for r in rows}):
+    group = sorted((r for r in rows if r['flops_budget'] == budget), key=lambda r: r['effective_params'])
+    try:
+        coeffs, _ = fit_local_isoflop([r['effective_params'] for r in group], [r['val_bpb'] for r in group])
+    except ValueError:
+        continue
+    best = int(np.argmin([r['val_bpb'] for r in group]))
+    window = group[best-2:best+3]
+    residual = np.array([r['val_bpb'] for r in window]) - np.polyval(coeffs, np.log10([r['effective_params'] for r in window]))
+    pooled_ss += float(residual @ residual)
+    pooled_df += 2
+noise_sigma = max(args.noise_sigma, np.sqrt(pooled_ss / pooled_df) if pooled_df else 0.0)
 for budget in sorted({r['flops_budget'] for r in rows}):
     group = sorted((r for r in rows if r['flops_budget'] == budget), key=lambda r:r['effective_params'])
     x = np.log10([r['effective_params'] for r in group]); y = [r['val_bpb'] for r in group]
@@ -65,7 +87,7 @@ for budget in sorted({r['flops_budget'] for r in rows}):
     z = -b/(2*a); n = 10**z
     d = float(10 ** np.interp(z,x,np.log10([r['tokens_trained'] for r in group])))
     passes = float(10 ** np.interp(z,x,np.log10([r['passes'] for r in group])))
-    repeat_factor = float(10 ** np.interp(z,x,np.log10([r['repeat_factor'] for r in group])))
+    repeat_factor = max(1.0, passes)
     observed = np.asarray(y, dtype=float)
     best_index = int(np.argmin(observed))
     residuals = observed[best_index-2:best_index+3] - np.polyval([a,b,c], x[best_index-2:best_index+3])
@@ -73,7 +95,7 @@ for budget in sorted({r['flops_budget'] for r in rows}):
     rng = np.random.default_rng(42 + int(np.log10(budget)*1000))
     samples = []
     for _ in range(500):
-        boot_y = observed + rng.choice(residuals, size=len(observed), replace=True)
+        boot_y = observed + rng.normal(0, noise_sigma, size=len(observed))
         try:
             (ba,bb,bc), _ = fit_local_isoflop([r['effective_params'] for r in group], boot_y)
         except ValueError:
@@ -83,17 +105,29 @@ for budget in sorted({r['flops_budget'] for r in rows}):
         bd = 10 ** np.interp(bz, x, np.log10([r['tokens_trained'] for r in group]))
         samples.append((bn, bd, bd/bn))
     bootstrap_optima[budget] = np.asarray(samples)
-    ci = np.percentile(samples, [2.5, 97.5], axis=0) if len(samples) >= 100 else np.full((2,3), np.nan)
+    # Count failed fits in both tails; if either endpoint is unresolved, report
+    # no finite interval rather than silently conditioning on successful fits.
+    failures = 500 - len(samples)
+    if len(samples) >= 100 and failures < 12:
+        ordered = np.sort(np.asarray(samples), axis=0)
+        ci = np.vstack([ordered[12 - failures], ordered[min(len(samples)-1, 487)]])
+    else:
+        ci = np.full((2,3), np.nan)
     # Shift a five-point window by one depth in either direction as a sensitivity check.
     shifted = []
+    invalid_shift = False
     for start in (best_index-3, best_index-1):
         if 0 <= start and start+5 <= len(x):
             q = np.polyfit(x[start:start+5], observed[start:start+5], 2)
             if q[0] > 0 and x[start] < -q[1]/(2*q[0]) < x[start+4]:
                 shifted.append(10**(-q[1]/(2*q[0])))
+            else:
+                invalid_shift = True
     sensitivity = max((abs(v/n - 1) for v in shifted), default=0.0)
     budget_status[str(budget)] = {'status': 'valid', 'bootstrap_successes': len(samples),
-                                  'window_shift_fraction': sensitivity, 'sensitive': bool(sensitivity > 0.1)}
+                                  'bootstrap_failures': failures, 'bootstrap_noise_sigma': float(noise_sigma),
+                                  'window_shift_fraction': sensitivity, 'invalid_shift': invalid_shift,
+                                  'sensitive': bool(invalid_shift or sensitivity > 0.1)}
     optimal.append(dict(flops=budget, effective_params=n, tokens=d, ratio=d/n,
                         val_bpb=float(np.polyval([a,b,c],z)), best_measured_bpb=float(min(y)), passes=passes, repeat_factor=repeat_factor,
                         fit_min_params=10**fit_x[0], fit_max_params=10**fit_x[-1],
@@ -119,7 +153,7 @@ for label, group in [('fresh', [r for r in optimal if r['passes'] <= 1.0]), ('re
                      'tokens_exponent':ad, 'tokens_coefficient':10**cd,
                      'params_slope_se':float(np.sqrt(np.sum((np.log10([r['effective_params'] for r in group])-(an*x+cn))**2)/(len(group)-2)/np.sum((x-x.mean())**2))),
                      'tokens_slope_se':float(np.sqrt(np.sum((np.log10([r['tokens'] for r in group])-(ad*x+cd))**2)/(len(group)-2)/np.sum((x-x.mean())**2)))}
-        if all(len(bootstrap_optima[r['flops']]) >= 100 for r in group):
+        if all(len(bootstrap_optima[r['flops']]) == 500 for r in group):
             rng=np.random.default_rng(104)
             slopes=[]
             for _ in range(500):
@@ -159,6 +193,23 @@ else:
     condition = float(np.linalg.cond(best.jac))
     identified = (best.success and not np.any(best.active_mask) and np.isfinite(condition)
                   and condition < 1e8 and np.any(n > un * (1 + 1e-8)) and len(loss) > len(best.x))
+    likelihood_ratios = {}
+    if identified:
+        variance = 2 * best.cost / (len(loss) - len(best.x))
+        for index in (5, 6):
+            free = [i for i in range(len(best.x)) if i != index]
+            fixed = best.x.copy()
+            fixed[index] = upper[index]
+            def profile(values):
+                trial = fixed.copy()
+                trial[free] = values
+                return predict(trial) - loss
+            bound_fit = least_squares(profile, best.x[free], bounds=(np.array(lower)[free], np.array(upper)[free]), max_nfev=5000)
+            delta = max(0.0, 2 * (bound_fit.cost - best.cost))
+            ratio = delta / max(variance, np.finfo(float).tiny)
+            likelihood_ratios[names[index]] = float(ratio)
+            if not bound_fit.success or ratio <= 3.84:
+                identified = False
     standard_errors = None
     if identified:
         covariance = np.linalg.pinv(best.jac.T @ best.jac) * (2 * best.cost / (len(loss) - len(best.x)))
@@ -166,6 +217,7 @@ else:
     fits['data_constrained']={'status':'fit' if identified else 'unidentified', 'parameters':dict(zip(names,best.x)),
                               'standard_errors':standard_errors, 'jacobian_condition': condition if np.isfinite(condition) else None,
                               'active_bounds':best.active_mask.tolist(),
+                              'bound_likelihood_ratios': likelihood_ratios,
                               'rmse_bpb':float(np.sqrt(np.mean(best.fun**2))), 'points':len(rows),
                               'units':'N and D in millions; loss in bits per byte'}
 (args.output_dir/'fits.json').write_text(json.dumps(fits,indent=2,allow_nan=False)+'\n')
@@ -199,7 +251,8 @@ fig,ax=plt.subplots(figsize=(6,4)); ax.plot([r['flops'] for r in optimal],[r['ra
 area_plot=False
 if args.area_dir:
     area_files=sorted(args.area_dir.glob('*.json'))
-    payloads=[json.loads(p.read_text()) for p in area_files]
+    valid_names = {r['run_name'] for r in rows}
+    payloads=[p for p in (json.loads(path.read_text()) for path in area_files) if p.get('checkpoint') in valid_names]
     def checkpoint_order(payload):
         match = re.search(r'_([0-9.]+e[+-]?[0-9]+)_d([0-9]+)$', payload['checkpoint'], re.I)
         return (float(match.group(1)), int(match.group(2))) if match else (float('inf'), 0)
@@ -212,7 +265,7 @@ if args.area_dir:
         areas=sorted(manifest['area_split_bytes'])
         matrix=np.array([[p['areas'].get(a,{}).get('bits_per_byte',np.nan) for p in payloads] for a in areas],dtype=float)
         fig,ax=plt.subplots(figsize=(max(7,len(payloads)*.45),max(5,min(60,len(areas)*.18))))
-        im=ax.imshow(matrix,aspect='auto',interpolation='nearest'); ax.set_yticks(range(len(areas)),[a + (' [' + manifest['area_evaluation_set'][a] + ']') + (' *' if a in expected_areas else '') for a in areas],fontsize=4); ax.set_xticks(range(len(payloads)),[p['checkpoint'] for p in payloads],rotation=90,fontsize=6); ax.set(title='Held-out difficulty (unseen = transfer; * file-level split)',xlabel='Checkpoint'); fig.colorbar(im,ax=ax,label='Bits per byte'); fig.savefig(plot_dir/'directory_difficulty.png'); plt.close(fig); area_plot=True
+        im=ax.imshow(matrix,aspect='auto',interpolation='nearest',vmax=np.nanpercentile(matrix,99)); ax.set_yticks(range(len(areas)),[a + (' [' + manifest['area_evaluation_set'][a] + ']') + (' *' if a in expected_areas else '') for a in areas],fontsize=4); ax.set_xticks(range(len(payloads)),[p['checkpoint'] for p in payloads],rotation=90,fontsize=6); ax.set(title='Held-out difficulty (unseen = transfer; * file-level split)',xlabel='Checkpoint'); fig.colorbar(im,ax=ax,label='Bits per byte (99th percentile cap)'); fig.savefig(plot_dir/'directory_difficulty.png'); plt.close(fig); area_plot=True
 card=['## Scaling-law results','','We trained on the Lean corpus with held-out source directories. The figures report validation bits per byte, training compute and effective parameters (transformer matrices plus the language-model head).','',
       '![IsoFLOP curves](assets/isoflop.png)','','![Best loss against compute](assets/best_loss.png)','','![Optimal model size and training tokens](assets/optimal_nd.png)','','![Optimal tokens per parameter](assets/tokens_per_param.png)','']
 if manifest.get('train') and manifest.get('validation'):
@@ -226,13 +279,17 @@ for regime in ('fresh','repeated'):
         intervals = ''
         if 'params_exponent_ci' in fit:
             ni, di = fit['params_exponent_ci'], fit['tokens_exponent_ci']
-            intervals = f" Bootstrap 95% intervals are [{ni[0]:.3f}, {ni[1]:.3f}] and [{di[0]:.3f}, {di[1]:.3f}], respectively."
+            intervals = f" Noise-only bootstrap 95% intervals are [{ni[0]:.3f}, {ni[1]:.3f}] and [{di[0]:.3f}, {di[1]:.3f}], respectively; they exclude uncertainty from the fitting-window choice."
         card += [f"For {regime} data, the fitted exponents are N ∝ C^{fit['params_exponent']:.3f} and D ∝ C^{fit['tokens_exponent']:.3f}." + intervals, '']
 card += ['| FLOPs | Effective parameters (95% CI) | Training tokens | Tokens/parameter | Fitted BPB | Best measured BPB | Passes |','| ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
 for r in optimal:
     card.append(f"| {r['flops']:.3g} | {r['effective_params']:,.0f} ({r['params_ci_low']:,.0f}–{r['params_ci_high']:,.0f}) | {r['tokens']:,.0f} | {r['ratio']:.2f} | {r['val_bpb']:.4f} | {r['best_measured_bpb']:.4f} | {r['passes']:.2f} |")
 sensitive = [f'{float(b):.3g}' for b, status in budget_status.items() if status.get('sensitive')]
 if sensitive:
-    card += ['', 'The fitted optimum moves by more than 10% when the fitting window shifts at FLOP budgets ' + ', '.join(sensitive) + '; interpret those points with care.']
-card += ['', 'Token-equivalent passes divide text-token exposures by the training split text-token count. Reuse factors and measured unique token positions are recorded in the results data. Three areas use file-level validation splits. Matched validation measures held-out leaves from training areas; difficulty-only leaves and unseen areas are excluded from scaling fits, and unseen areas measure transfer.','']
+    card += ['', 'The fitted optimum is sensitive to a one-depth fitting-window shift (more than 10% change, or an invalid shifted fit) at FLOP budgets ' + ', '.join(sensitive) + '; regime exponents that include these budgets inherit this sensitivity.']
+invalid = [f'{float(b):.3g}: {s["reason"]}' for b, s in budget_status.items() if s['status'] == 'invalid']
+if invalid:
+    card += ['', 'Invalid budgets excluded from fits: ' + '; '.join(invalid) + '.']
+card += ['', f"Data-constrained fit status: {fits['data_constrained']['status']}. Repeated-data exponent status: {fits['repeated'].get('status', 'fit')}."]
+card += ['', f"Token-equivalent passes divide text-token exposures by the training split text-token count. Reuse factors and measured unique token positions are recorded in the results data. {len(manifest.get('file_level_areas', {}))} areas use file-level validation splits. Matched validation measures held-out leaves from training areas; difficulty-only leaves and unseen areas are excluded from scaling fits, and unseen areas measure transfer.",'']
 (args.output_dir/'model_card_results.md').write_text('\n'.join(card))

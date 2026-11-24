@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from nanochat.checkpoint_manager import build_model, find_last_step
@@ -22,6 +23,7 @@ manifest = json.loads(args.manifest.read_text())
 sha = hashlib.sha256((args.tokenizer / 'tokenizer.pkl').read_bytes()).hexdigest()
 if sha != manifest['tokenizer_sha256']:
     raise ValueError('Tokenizer does not match manifest')
+os.environ['NANOCHAT_TOKENIZER_DIR'] = str(args.tokenizer.resolve())
 model, tokenizer, metadata = build_model(str(args.checkpoint), find_last_step(str(args.checkpoint)), device, 'eval')
 if sha != metadata['tokenizer_sha256'] or metadata['tokenizer_bucket_path'] != manifest['tokenizer_bucket_path']:
     raise ValueError('Tokenizer does not match checkpoint')
