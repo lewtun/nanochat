@@ -41,10 +41,15 @@ usage() {
     cat <<'EOF'
 Usage: RUN_LABEL=<label> bash runs/scaling_laws_hf.sh [--worker]
 
-Submits one detached h200x8 Job for the complete 24-point sweep.
+Submits one detached Job. Defaults are the original ClimbMix h200x8 grid.
+Set HF_BUCKET, DATA_PREFIX, TRAIN_FLAVOR, NPROC_PER_NODE, FLOPS_BUDGETS,
+DEPTHS, CORE_METRIC and EVAL_TOKENS to configure a sweep; budgets and depths
+are space-separated. MIN_TOKEN_PARAM_RATIO and MAX_TOKEN_PARAM_RATIO bound
+the estimated grid. Custom data disables CORE unless explicitly enabled.
 
 Example:
-  RUN_LABEL=august-2026 bash runs/scaling_laws_hf.sh
+  RUN_LABEL=lean DATA_PREFIX=base_data_rh TRAIN_FLAVOR=h200 NPROC_PER_NODE=1 \
+    FLOPS_BUDGETS="1e15" DEPTHS="2 4" bash runs/scaling_laws_hf.sh
 
 --worker is reserved for the remote Job.
 EOF
