@@ -24,10 +24,13 @@ parser.add_argument('--area-dir', type=Path, help='directory of per-checkpoint a
 parser.add_argument('--asset-prefix', default='rh', help='only analyze runs using this dataset and tokenizer version')
 parser.add_argument('--head-dim', type=int, default=64)
 parser.add_argument('--noise-sigma', type=float, default=0, help='independently measured BPB noise floor (pooled with residual estimate conservatively)')
+parser.add_argument('--repeated-noise-sigma', type=float, help='independent repeated-data noise floor; pool residual variance separately by regime')
 parser.add_argument('--diagnostics', type=Path, help='JSON with controlled seed and optimizer comparisons for the model card')
 args = parser.parse_args()
 if not np.isfinite(args.noise_sigma) or args.noise_sigma < 0:
     parser.error('--noise-sigma must be finite and nonnegative')
+if args.repeated_noise_sigma is not None and (not np.isfinite(args.repeated_noise_sigma) or args.repeated_noise_sigma < 0):
+    parser.error('--repeated-noise-sigma must be finite and nonnegative')
 manifest = json.loads(args.manifest.read_text())
 if not manifest.get('document_eos') or manifest.get('asset_prefix') != args.asset_prefix:
     raise ValueError('Manifest does not describe the canonical EOS dataset')
@@ -66,6 +69,8 @@ budget_status = {}
 # Pool local residual variance using the two residual degrees of freedom per
 # quadratic. Five residuals alone underestimate the observation noise.
 pooled_ss, pooled_df = 0.0, 0
+regime_ss = {'fresh': 0.0, 'repeated': 0.0}
+regime_count = {'fresh': 0, 'repeated': 0}
 for budget in sorted({r['flops_budget'] for r in rows}):
     group = sorted((r for r in rows if r['flops_budget'] == budget), key=lambda r: r['effective_params'])
     try:
@@ -75,9 +80,22 @@ for budget in sorted({r['flops_budget'] for r in rows}):
     best = int(np.argmin([r['val_bpb'] for r in group]))
     window = group[best-2:best+3]
     residual = np.array([r['val_bpb'] for r in window]) - np.polyval(coeffs, np.log10([r['effective_params'] for r in window]))
-    pooled_ss += float(residual @ residual)
+    ss = float(residual @ residual)
+    pooled_ss += ss
     pooled_df += 2
+    x = np.log10([r['effective_params'] for r in group])
+    vertex = -coeffs[1] / (2 * coeffs[0])
+    estimated_passes = 10 ** np.interp(vertex, x, np.log10([r['passes'] for r in group]))
+    regime = 'fresh' if estimated_passes <= 1 else 'repeated'
+    regime_ss[regime] += ss
+    regime_count[regime] += 1
 noise_sigma = max(args.noise_sigma, np.sqrt(pooled_ss / pooled_df) if pooled_df else 0.0)
+regime_noise = None
+if args.repeated_noise_sigma is not None and all(regime_count[r] >= 3 for r in regime_count):
+    regime_noise = {
+        'fresh': max(args.noise_sigma, np.sqrt(regime_ss['fresh'] / (2 * regime_count['fresh']))),
+        'repeated': max(args.repeated_noise_sigma, np.sqrt(regime_ss['repeated'] / (2 * regime_count['repeated']))),
+    }
 for budget in sorted({r['flops_budget'] for r in rows}):
     group = sorted((r for r in rows if r['flops_budget'] == budget), key=lambda r:r['effective_params'])
     x = np.log10([r['effective_params'] for r in group]); y = [r['val_bpb'] for r in group]
@@ -90,6 +108,7 @@ for budget in sorted({r['flops_budget'] for r in rows}):
     d = float(10 ** np.interp(z,x,np.log10([r['tokens_trained'] for r in group])))
     passes = float(10 ** np.interp(z,x,np.log10([r['passes'] for r in group])))
     repeat_factor = max(1.0, passes)
+    budget_noise = regime_noise['fresh' if passes <= 1 else 'repeated'] if regime_noise else noise_sigma
     observed = np.asarray(y, dtype=float)
     best_index = int(np.argmin(observed))
     residuals = observed[best_index-2:best_index+3] - np.polyval([a,b,c], x[best_index-2:best_index+3])
@@ -97,7 +116,7 @@ for budget in sorted({r['flops_budget'] for r in rows}):
     rng = np.random.default_rng(42 + int(np.log10(budget)*1000))
     samples = []
     for _ in range(500):
-        boot_y = observed + rng.normal(0, noise_sigma, size=len(observed))
+        boot_y = observed + rng.normal(0, budget_noise, size=len(observed))
         try:
             (ba,bb,bc), _ = fit_local_isoflop([r['effective_params'] for r in group], boot_y)
         except ValueError:
@@ -127,7 +146,8 @@ for budget in sorted({r['flops_budget'] for r in rows}):
                 invalid_shift = True
     sensitivity = max((abs(v/n - 1) for v in shifted), default=0.0)
     budget_status[str(budget)] = {'status': 'valid', 'bootstrap_successes': len(samples),
-                                  'bootstrap_failures': failures, 'bootstrap_noise_sigma': float(noise_sigma),
+                                  'bootstrap_failures': failures, 'bootstrap_noise_sigma': float(budget_noise),
+                                  'bootstrap_noise_pool': 'regime' if regime_noise else 'all budgets',
                                   'window_shift_fraction': sensitivity, 'invalid_shift': invalid_shift,
                                   'sensitive': bool(invalid_shift or sensitivity > 0.1)}
     optimal.append(dict(flops=budget, effective_params=n, tokens=d, ratio=d/n,
@@ -299,6 +319,8 @@ if args.diagnostics:
     if 'batch_comparison' in diagnostics:
         batch = diagnostics['batch_comparison']
         card += [f"At {batch['budget']:.3g} FLOPs and depth {batch['depth']}, an efficient batch changed BPB from {batch['baseline_bpb']:.6f} to {batch['comparison_bpb']:.6f}. This comparison also slightly changed total batch and optimizer scaling, so it does not isolate numerical rounding.", '']
+if regime_noise:
+    card += [f"Bootstrap noise uses residual variance pooled separately across fresh and repeated regimes, with independent seed-derived floors; the resulting standard deviations are {regime_noise['fresh']:.4f} and {regime_noise['repeated']:.4f} BPB, respectively. These estimates assume noise is comparable within each regime.", '']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
 else: card += ['Directory difficulty plot pending per-checkpoint evaluation.','']
 for regime in ('fresh','repeated'):

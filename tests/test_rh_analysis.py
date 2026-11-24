@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import pytest
 
 
 def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
@@ -41,6 +42,27 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     duplicate = subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), str(path), '--output-dir', str(output)], capture_output=True, text=True, timeout=60)
     assert duplicate.returncode != 0
     assert 'Duplicate budget/depth' in duplicate.stderr
+
+    # Seed floors can differ by data regime; require at least three budgets in
+    # each pool before the analysis reports separate noise estimates.
+    with path.open() as f:
+        records = list(csv.DictReader(f))
+    base = [r for r in records if float(r['flops_budget']) == 1e15]
+    for budget in (2e17, 4e17, 8e17):
+        for row in base:
+            r = row.copy()
+            r['flops_budget'] = budget
+            r['passes'] = 2
+            records.append(r)
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(records)
+    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output), '--noise-sigma', '0.2', '--repeated-noise-sigma', '0.1'], check=True, env=env, timeout=60)
+    status = json.loads((output / 'budget_status.json').read_text())
+    assert status[str(1e15)]['bootstrap_noise_pool'] == 'regime'
+    assert status[str(1e15)]['bootstrap_noise_sigma'] == pytest.approx(.2)
+    assert status[str(2e17)]['bootstrap_noise_sigma'] == pytest.approx(.1)
 
 
 def test_recovers_identifiable_data_constrained_law(tmp_path):
