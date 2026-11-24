@@ -24,6 +24,8 @@ def prepare(source, output, seed, shard_size):
     manifest_path = output / 'data_manifest.json'
     if manifest_path.exists():
         old = json.loads(manifest_path.read_text())
+        if 'file_level_areas' not in old:
+            raise ValueError('Existing data uses the older split; use a fresh output directory')
         if old.get('seed') != seed or old.get('shard_size') != shard_size:
             raise ValueError('Existing manifest has different preparation settings')
         if not all((output / old['data_prefix'] / name).is_file() for name in old['parquet_files']):
@@ -46,8 +48,16 @@ def prepare(source, output, seed, shard_size):
             eligible[area(relative)][f.parent] += size
     # The minimum feasible coverage minimizes the deviation from the 3% target.
     held = {min(dirsizes, key=lambda d: (dirsizes[d], str(d))) for dirsizes in eligible.values()}
-    train = [f for f in files if f.parent not in held]
-    val = [f for f in files if f.parent in held]
+    fallback_areas = sorted(set(area_bytes) - set(eligible))
+    file_holdouts = {}
+    rng = random.Random(seed)
+    for name in fallback_areas:
+        candidates = [f for f in files if area(f.relative_to(source)) == name]
+        count = max(1, round(len(candidates) * 0.03))
+        file_holdouts[name] = sorted(rng.sample(candidates, count))
+    held_files = {f for selected in file_holdouts.values() for f in selected}
+    train = [f for f in files if f.parent not in held and f not in held_files]
+    val = [f for f in files if f.parent in held or f in held_files]
     random.Random(seed).shuffle(train)
     data = output / 'base_data_rh'
     data.mkdir(parents=True, exist_ok=True)
@@ -68,7 +78,8 @@ def prepare(source, output, seed, shard_size):
                 'num_train_shards': len(names)-1, 'validation_shard': name,
                 'held_out_directories': sorted(str(d.relative_to(source)) for d in held),
                 'validation_files': [str(f.relative_to(source)) for f in val],
-                'uncovered_areas': sorted(set(area_bytes) - set(eligible)),
+                'file_level_areas': {name: [str(f.relative_to(source)) for f in selected] for name, selected in file_holdouts.items()},
+                'uncovered_areas': [],
                 'train': stats(train), 'validation': stats(val),
                 'area_bytes': dict(sorted(area_bytes.items()))}
     (output / 'data_manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')

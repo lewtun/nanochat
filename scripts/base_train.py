@@ -27,6 +27,7 @@ import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.scaling import cap_batch_for_steps
 from nanochat.common import compute_init, compute_cleanup, print0, DummyTracker, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
@@ -60,6 +61,7 @@ parser.add_argument("--target-param-data-ratio", type=float, default=12, help="c
 parser.add_argument("--track-data-exposure", action="store_true", help="count distinct text token positions seen; unsupported with resume")
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
+parser.add_argument("--min-steps", type=int, default=0, help="cap automatic batch to target at least this many FLOP-budget optimizer steps (0 disables)")
 parser.add_argument("--embedding-lr", type=float, default=0.3, help="learning rate for embedding parameters (Adam)")
 parser.add_argument("--unembedding-lr", type=float, default=0.008, help="learning rate for unembedding parameters (Adam)")
 parser.add_argument("--weight-decay", type=float, default=0.28, help="cautious weight decay for the Muon optimizer (for weights)")
@@ -283,12 +285,17 @@ if total_batch_size == -1:
     batch_size_ratio = target_tokens / D_REF
     predicted_batch_size = B_REF * batch_size_ratio ** 0.383
     total_batch_size = 2 ** round(math.log2(predicted_batch_size)) # clamp to nearest power of 2 for efficiency
+    if args.min_steps > 0 and args.target_flops > 0:
+        total_batch_size = cap_batch_for_steps(total_batch_size, args.target_flops,
+                                               num_flops_per_token, args.min_steps,
+                                               args.max_seq_len * ddp_world_size)
+        print0(f"Budget-limited batch: {total_batch_size:,} tokens for at least {args.min_steps} steps")
     # A batch must contain at least one full sequence per rank. Choose the
     # largest compatible device batch up to the requested memory limit.
     minimum_batch = args.max_seq_len * ddp_world_size
     total_batch_size = max(total_batch_size, minimum_batch)
     if total_batch_size % minimum_batch:
-        total_batch_size = math.ceil(total_batch_size / minimum_batch) * minimum_batch
+        total_batch_size = (total_batch_size // minimum_batch) * minimum_batch
     max_device_batch = total_batch_size // minimum_batch
     device_batch = min(args.device_batch_size, max_device_batch)
     while total_batch_size % (device_batch * minimum_batch):

@@ -14,6 +14,15 @@ TRAIN_IMAGE="${TRAIN_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}"
 TRAIN_FLAVOR="${TRAIN_FLAVOR:-h200x8}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 DATA_PREFIX="${DATA_PREFIX:-base_data_climbmix}"
+ASSET_PREFIX="${ASSET_PREFIX:-}"
+if [[ "$DATA_PREFIX" == "base_data_rh" ]]; then
+    HEAD_DIM="${HEAD_DIM:-64}"
+    MIN_STEPS="${MIN_STEPS:-500}"
+else
+    HEAD_DIM="${HEAD_DIM:-128}"
+    MIN_STEPS="${MIN_STEPS:-0}"
+fi
+export ASSET_PREFIX HEAD_DIM MIN_STEPS
 if [[ -z "${CORE_METRIC+x}" ]]; then
     if [[ "$DATA_PREFIX" == "base_data_climbmix" ]]; then CORE_METRIC=1; else CORE_METRIC=0; fi
 fi
@@ -26,7 +35,7 @@ NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
 read -r -a DEPTHS <<< "${DEPTHS:-10 12 14 16 18 20}"
 
-RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
+RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,head_dim,asset_prefix,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,total_batch_size,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -42,7 +51,7 @@ usage() {
 Usage: RUN_LABEL=<label> bash runs/scaling_laws_hf.sh [--worker]
 
 Submits one detached Job. Defaults are the original ClimbMix h200x8 grid.
-Set HF_BUCKET, DATA_PREFIX, TRAIN_FLAVOR, NPROC_PER_NODE, FLOPS_BUDGETS,
+Set HF_BUCKET, ASSET_PREFIX, DATA_PREFIX, TRAIN_FLAVOR, NPROC_PER_NODE, FLOPS_BUDGETS,
 DEPTHS, CORE_METRIC and EVAL_TOKENS to configure a sweep; budgets and depths
 are space-separated. MIN_TOKEN_PARAM_RATIO and MAX_TOKEN_PARAM_RATIO bound
 the estimated grid. Custom data disables CORE unless explicitly enabled.
@@ -141,7 +150,9 @@ validate_settings() {
     [[ "$TRACKIO_BUCKET" == */* ]] || die "TRACKIO_BUCKET must be namespace/name"
     [[ "$TRACKIO_SPACE_ID" == */* ]] || die "TRACKIO_SPACE_ID must be namespace/name"
     [[ "$NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]] || die "NPROC_PER_NODE must be a positive integer"
-    [[ "$DATA_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid DATA_PREFIX"
+    [[ "$DATA_PREFIX" =~ ^[A-Za-z0-9._-]+$ && "$DATA_PREFIX" != "." && "$DATA_PREFIX" != ".." ]] || die "Invalid DATA_PREFIX"
+    [[ -z "$ASSET_PREFIX" || ( "$ASSET_PREFIX" =~ ^[A-Za-z0-9._-]+$ && "$ASSET_PREFIX" != "." && "$ASSET_PREFIX" != ".." ) ]] || die "Invalid ASSET_PREFIX"
+    [[ "$HEAD_DIM" =~ ^[1-9][0-9]*$ && "$MIN_STEPS" =~ ^[0-9]+$ ]] || die "Invalid HEAD_DIM or MIN_STEPS"
     [[ "$CORE_METRIC" == 0 || "$CORE_METRIC" == 1 ]] || die "CORE_METRIC must be 0 or 1"
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
     run_python - "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
@@ -272,13 +283,13 @@ assert bucket in text and mount in text, f"Expected {bucket} mounted at {mount}:
 
 parse_training_log() {
     local log_file="$1" flops_budget="$2" depth="$3" run_name="$4" train_time="$5"
-    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" <<'PY'
+    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" "$ASSET_PREFIX" "$HEAD_DIM" <<'PY'
 import csv
 import math
 import re
 import sys
 
-log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text = sys.argv[1:]
+log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text, asset_prefix, expected_head_dim = sys.argv[1:]
 text = open(log_path, encoding="utf-8", errors="replace").read()
 
 def last(pattern, label, flags=re.MULTILINE):
@@ -326,15 +337,22 @@ exposures = re.findall(r"Text exposure: unique_tokens=(\d+) text_tokens=(\d+)", 
 unique_tokens, text_tokens = map(int, exposures[-1]) if exposures else (0, 0)
 if int(corpus_tokens_text) and not unique_tokens:
     raise SystemExit("Missing measured training data exposure")
+width = integer(r'"n_embd"\s*:\s*(\d+)', "model width")
+heads = integer(r'"n_head"\s*:\s*(\d+)', "head count")
+if width % heads or width // heads != int(expected_head_dim):
+    raise SystemExit(f"Unexpected head dimension in {log_path}")
 row = [
     run_name,
     flops_budget,
     f"{actual_flops:.12g}",
     depth,
-    ((depth * 64 + 127) // 128) * 128,
+    width,
+    width // heads,
+    asset_prefix,
     *params,
     params[2] + params[3],
     num_iterations,
+    batch_size,
     num_iterations * batch_size,
     text_tokens if unique_tokens else "",
     unique_tokens if unique_tokens else "",
@@ -405,6 +423,9 @@ payload = {
     "hardware": os.environ["TRAIN_FLAVOR"],
     "image": os.environ["TRAIN_IMAGE"],
     "data_bucket": os.environ["HF_BUCKET"],
+    "asset_prefix": os.environ.get("ASSET_PREFIX", ""),
+    "head_dim": int(os.environ["HEAD_DIM"]),
+    "min_steps": int(os.environ["MIN_STEPS"]),
     "data_manifest_git_sha": os.environ.get("DATA_MANIFEST_GIT_SHA", "unknown"),
     "trackio_space_id": os.environ["TRACKIO_SPACE_ID"],
     "trackio_bucket": os.environ["TRACKIO_BUCKET"],
@@ -494,7 +515,7 @@ PY
 stage_training_assets() {
     local runtime_base="$1"
     log "Staging training assets from the mounted bucket into local Job storage"
-    run_python - "$NANOCHAT_MOUNT" "$runtime_base" "$DATA_PREFIX" <<'PY'
+    run_python - "$NANOCHAT_MOUNT/${ASSET_PREFIX}" "$runtime_base" "$DATA_PREFIX" <<'PY'
 import json
 import os
 import shutil
@@ -571,7 +592,7 @@ run_point() {
         log "Skipping previously excluded point $point_name"
         return
     fi
-    point_info="$(run_python -m scripts.scaling_point --depth "$depth" --flops "$flops_budget" --vocab-size "$TOKENIZER_VOCAB_SIZE")"
+    point_info="$(run_python -m scripts.scaling_point --depth "$depth" --flops "$flops_budget" --vocab-size "$TOKENIZER_VOCAB_SIZE" --head-dim "$HEAD_DIM")"
     ratio="$(run_python -c 'import json,sys; print(json.loads(sys.argv[1])["tokens_per_param"])' "$point_info")"
     if ! run_python - "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" <<'PYRATIO'
 import sys
@@ -580,6 +601,16 @@ raise SystemExit(0 if lower <= ratio <= upper else 1)
 PYRATIO
     then
         log "Skipping $point_name: estimated tokens:params $ratio outside [$MIN_TOKEN_PARAM_RATIO, $MAX_TOKEN_PARAM_RATIO]"
+        printf '%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" >> "$RESULTS_DIR/skipped.csv"
+        return
+    fi
+    if ! run_python - "$point_info" "$flops_budget" "$MIN_STEPS" "$NPROC_PER_NODE" <<'PYSTEPS'
+import json, sys
+info = json.loads(sys.argv[1]); budget = float(sys.argv[2]); min_steps = int(sys.argv[3]); ranks = int(sys.argv[4])
+raise SystemExit(0 if not min_steps or budget / info['flops_per_token'] >= min_steps * 2048 * ranks else 1)
+PYSTEPS
+    then
+        log "Skipping $point_name: budget cannot fit $MIN_STEPS steps at the minimum distributed batch"
         printf '%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" >> "$RESULTS_DIR/skipped.csv"
         return
     fi
@@ -608,6 +639,8 @@ PYRATIO
     set +e
     NANOCHAT_BASE_DIR="$runtime_base" NANOCHAT_DATA_DIR="$runtime_base/$DATA_PREFIX" OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" -m scripts.base_train -- \
         --depth="$depth" \
+        --head-dim="$HEAD_DIM" \
+        --min-steps="$MIN_STEPS" \
         "${horizon_args[@]}" \
         --run="$run_name" \
         --model-tag="$model_tag" \
@@ -658,7 +691,7 @@ if count != expected:
     raise SystemExit(f"Expected {expected} CUDA devices, found {count}")
 PY
 
-    data_manifest_path="$NANOCHAT_MOUNT/data_manifest.json"
+    data_manifest_path="$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}data_manifest.json"
     [[ -f "$data_manifest_path" ]] || die "Missing $data_manifest_path"
     DATA_MANIFEST_GIT_SHA="$(validate_data_manifest_stream < "$data_manifest_path")"
     run_python - "$data_manifest_path" "$DATA_PREFIX" <<'PYDATA'
@@ -670,8 +703,8 @@ PYDATA
     TRAIN_CORPUS_TOKENS="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("train", {}).get("tokens", 0))' "$data_manifest_path")"
     TOKENIZER_VOCAB_SIZE="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1]))["tokenizer_vocab_size"])' "$data_manifest_path")"
     export DATA_MANIFEST_GIT_SHA TRAIN_CORPUS_TOKENS TOKENIZER_VOCAB_SIZE
-    [[ -s "$NANOCHAT_MOUNT/tokenizer/tokenizer.pkl" ]] || die "Missing tokenizer.pkl"
-    [[ -s "$NANOCHAT_MOUNT/tokenizer/token_bytes.pt" ]] || die "Missing token_bytes.pt"
+    [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl" ]] || die "Missing tokenizer.pkl"
+    [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/token_bytes.pt" ]] || die "Missing token_bytes.pt"
 
     RESULTS_DIR="$NANOCHAT_MOUNT/scaling_laws/$RUN_LABEL"
     RESULTS_FILE="$RESULTS_DIR/results.csv"
@@ -744,6 +777,9 @@ launcher_main() {
         --env "NPROC_PER_NODE=$NPROC_PER_NODE"
         --env "NANOCHAT_MOUNT=$NANOCHAT_MOUNT"
         --env "DATA_PREFIX=$DATA_PREFIX"
+        --env "ASSET_PREFIX=$ASSET_PREFIX"
+        --env "HEAD_DIM=$HEAD_DIM"
+        --env "MIN_STEPS=$MIN_STEPS"
         --env "CORE_METRIC=$CORE_METRIC"
         --env "EVAL_TOKENS=$EVAL_TOKENS"
         --env "MIN_TOKEN_PARAM_RATIO=$MIN_TOKEN_PARAM_RATIO"
@@ -757,7 +793,7 @@ launcher_main() {
 
     assert_pushed_sha "$git_sha"
     hf_cli auth whoami >/dev/null
-    manifest_git_sha="$(hf_cli buckets cp "hf://buckets/${HF_BUCKET}/data_manifest.json" - | validate_data_manifest_stream)"
+    manifest_git_sha="$(hf_cli buckets cp "hf://buckets/${HF_BUCKET}/${ASSET_PREFIX:+$ASSET_PREFIX/}data_manifest.json" - | validate_data_manifest_stream)"
     log "Validated data manifest created by $manifest_git_sha"
 
     active_jobs="$(hf_cli jobs ps --namespace "$HF_NAMESPACE" --label pipeline=nanochat-scaling-laws --label "run_label=$RUN_LABEL" --format json)"

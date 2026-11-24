@@ -8,9 +8,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--depth', type=int, required=True)
 parser.add_argument('--flops', type=float, required=True)
 parser.add_argument('--vocab-size', type=int, required=True)
+parser.add_argument('--head-dim', type=int, default=128)
 args = parser.parse_args()
-width = ((args.depth * 64 + 127) // 128) * 128
-heads = width // 128
+width = ((args.depth * 64 + args.head_dim - 1) // args.head_dim) * args.head_dim
+heads = width // args.head_dim
 with torch.device('meta'):
     model = GPT(GPTConfig(sequence_len=2048, vocab_size=args.vocab_size,
                           n_layer=args.depth, n_head=heads, n_kv_head=heads,

@@ -13,16 +13,23 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
+from nanochat.scaling import fit_local_isoflop
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--results', type=Path, nargs='+', required=True)
 parser.add_argument('--output-dir', type=Path, required=True)
 parser.add_argument('--area-dir', type=Path, help='directory of per-checkpoint area evaluation JSON files')
+parser.add_argument('--asset-prefix', default='rh_v2', help='only analyze runs using this dataset and tokenizer version')
+parser.add_argument('--head-dim', type=int, default=64)
 args = parser.parse_args()
 rows = []
 for path in args.results:
     with path.open() as f:
         for r in csv.DictReader(f):
+            if r.get('asset_prefix') != args.asset_prefix or r.get('head_dim') != str(args.head_dim):
+                raise ValueError(f'{path}: result does not match asset prefix {args.asset_prefix!r} and head dimension {args.head_dim}; do not mix experiments')
+            if int(r['model_dim']) != int(r['depth']) * 64 or int(r['num_iterations']) < 500:
+                raise ValueError(f'{path}: incompatible model width or fewer than 500 optimizer steps')
             rows.append({k: float(r[k]) for k in ('flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb')})
 if not rows:
     raise SystemExit('No results')
@@ -30,20 +37,19 @@ args.output_dir.mkdir(parents=True, exist_ok=True)
 optimal = []
 for budget in sorted({r['flops_budget'] for r in rows}):
     group = sorted((r for r in rows if r['flops_budget'] == budget), key=lambda r:r['effective_params'])
-    if len(group) < 5:
-        raise ValueError(f'{budget:g}: need at least five distinct model sizes')
     x = np.log10([r['effective_params'] for r in group]); y = [r['val_bpb'] for r in group]
-    if len(set(x)) != len(x): raise ValueError(f'{budget:g}: duplicate parameter counts')
-    if np.argmin(y) in (0, len(y)-1): raise ValueError(f'{budget:g}: observed minimum is not bracketed')
-    a,b,c = np.polyfit(x,y,2)
-    if a <= 0 or not x[0] < -b/(2*a) < x[-1]:
-        raise ValueError(f'{budget:g}: fitted minimum is not bracketed')
+    try:
+        (a,b,c), fit_x = fit_local_isoflop([r['effective_params'] for r in group], y)
+    except ValueError as error:
+        raise ValueError(f'{budget:g}: {error}') from error
     z = -b/(2*a); n = 10**z
     d = float(np.interp(z,x,[r['tokens_trained'] for r in group]))
     passes = float(np.interp(z,x,[r['passes'] for r in group]))
     repeat_factor = float(np.interp(z,x,[r['repeat_factor'] for r in group]))
     optimal.append(dict(flops=budget, effective_params=n, tokens=d, ratio=d/n,
-                        val_bpb=float(np.polyval([a,b,c],z)), passes=passes, repeat_factor=repeat_factor))
+                        val_bpb=float(np.polyval([a,b,c],z)), passes=passes, repeat_factor=repeat_factor,
+                        fit_min_params=10**fit_x[0], fit_max_params=10**fit_x[-1],
+                        quadratic_a=a, quadratic_b=b, quadratic_c=c))
 with (args.output_dir/'optimal.csv').open('w',newline='') as f:
     writer = csv.DictWriter(f,fieldnames=list(optimal[0])); writer.writeheader(); writer.writerows(optimal)
 fits = {}
@@ -96,8 +102,9 @@ for budget in sorted({r['flops_budget'] for r in rows}):
     group=sorted((r for r in rows if r['flops_budget']==budget),key=lambda r:r['effective_params'])
     x=np.array([r['effective_params'] for r in group]); y=np.array([r['val_bpb'] for r in group])
     line=ax.plot(x,y,'o',label=f'{budget:.0e} FLOPs')[0]
-    xx=np.linspace(np.log10(x.min()),np.log10(x.max()),120)
-    ax.plot(10**xx,np.polyval(np.polyfit(np.log10(x),y,2),xx),color=line.get_color(),alpha=.65)
+    opt = next(r for r in optimal if r['flops'] == budget)
+    xx=np.linspace(np.log10(opt['fit_min_params']),np.log10(opt['fit_max_params']),120)
+    ax.plot(10**xx,np.polyval([opt['quadratic_a'],opt['quadratic_b'],opt['quadratic_c']],xx),color=line.get_color(),alpha=.65)
 ax.set(xscale='log',xlabel='Effective parameters',ylabel='Validation bits per byte',title='IsoFLOP curves'); ax.legend(fontsize=8); fig.savefig(plot_dir/'isoflop.png'); plt.close(fig)
 fig,ax=plt.subplots(figsize=(6,4)); ax.plot([r['flops'] for r in optimal],[r['val_bpb'] for r in optimal],'o-'); ax.set(xscale='log',xlabel='Training FLOPs',ylabel='Optimal fitted bits per byte',title='Best validation loss vs compute'); fig.savefig(plot_dir/'best_loss.png'); plt.close(fig)
 fig,axes=plt.subplots(1,2,figsize=(10,4))
@@ -120,7 +127,7 @@ if args.area_dir:
         areas=sorted({name for p in payloads for name in p['areas']})
         matrix=np.array([[p['areas'].get(a,{}).get('bits_per_byte',np.nan) for p in payloads] for a in areas],dtype=float)
         fig,ax=plt.subplots(figsize=(max(7,len(payloads)*.45),max(5,min(60,len(areas)*.18))))
-        im=ax.imshow(matrix,aspect='auto',interpolation='nearest'); ax.set_yticks(range(len(areas)),areas,fontsize=4); ax.set_xticks(range(len(payloads)),[p['checkpoint'] for p in payloads],rotation=90,fontsize=6); ax.set(title='Held-out difficulty by source area',xlabel='Checkpoint'); fig.colorbar(im,ax=ax,label='Bits per byte'); fig.savefig(plot_dir/'directory_difficulty.png'); plt.close(fig); area_plot=True
+        im=ax.imshow(matrix,aspect='auto',interpolation='nearest'); ax.set_yticks(range(len(areas)),[a + (' *' if any(a in p.get('file_level_areas', {}) for p in payloads) else '') for a in areas],fontsize=4); ax.set_xticks(range(len(payloads)),[p['checkpoint'] for p in payloads],rotation=90,fontsize=6); ax.set(title='Held-out difficulty by source area (* file-level split)',xlabel='Checkpoint'); fig.colorbar(im,ax=ax,label='Bits per byte'); fig.savefig(plot_dir/'directory_difficulty.png'); plt.close(fig); area_plot=True
 card=['## Scaling-law results','','We trained on the Lean corpus with held-out source directories. The figures report validation bits per byte, effective parameters and training compute.','',
       '![IsoFLOP curves](assets/isoflop.png)','','![Best loss against compute](assets/best_loss.png)','','![Optimal model size and training tokens](assets/optimal_nd.png)','','![Optimal tokens per parameter](assets/tokens_per_param.png)','']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
@@ -132,5 +139,5 @@ for regime in ('fresh','repeated'):
 card += ['| FLOPs | Effective parameters | Training tokens | Tokens/parameter | Validation BPB | Token-equivalent passes |','| ---: | ---: | ---: | ---: | ---: | ---: |']
 for r in optimal:
     card.append(f"| {r['flops']:.1e} | {r['effective_params']:,.0f} | {r['tokens']:,.0f} | {r['ratio']:.2f} | {r['val_bpb']:.4f} | {r['passes']:.2f} |")
-card += ['', 'Token-equivalent passes divide text-token exposures by the full corpus text-token count. Reuse factors and measured unique token positions are recorded in the results data. Three areas have no eligible held-out leaf directory and are excluded from the difficulty map.','']
+card += ['', 'Token-equivalent passes divide text-token exposures by the full corpus text-token count. Reuse factors and measured unique token positions are recorded in the results data. Three areas use file-level validation splits; other areas use directory-level splits.','']
 (args.output_dir/'model_card_results.md').write_text('\n'.join(card))

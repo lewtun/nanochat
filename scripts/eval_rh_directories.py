@@ -64,7 +64,7 @@ for checkpoint in args.checkpoints:
         row['bits_per_byte'] = row['nats'] / (math.log(2) * row['bytes']) if row['bytes'] else None
     payload = {'checkpoint': checkpoint.name, 'step': step, 'sequence_length': seq_len,
                'method': 'document BOS, nonoverlapping context windows',
-               'uncovered_areas': manifest['uncovered_areas'], 'areas': dict(sorted(stats.items()))}
+               'uncovered_areas': manifest['uncovered_areas'], 'file_level_areas': manifest.get('file_level_areas', {}), 'areas': dict(sorted(stats.items()))}
     temporary = destination.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(payload, indent=2) + '\n')
     temporary.replace(destination)
