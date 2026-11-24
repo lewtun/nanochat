@@ -95,7 +95,10 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
     def stats(items):
         return {'files': len(items), 'bytes': sum(f.stat().st_size for f in items)}
     git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parent, text=True).strip()
-    source_sha = hashlib.file_digest(source_tarball.open('rb'), 'sha256').hexdigest() if source_tarball else None
+    source_sha = None
+    if source_tarball:
+        with source_tarball.open('rb') as handle:
+            source_sha = hashlib.file_digest(handle, 'sha256').hexdigest()
     manifest = {'schema_version': 1, 'status': 'PREPARED', 'dataset': 'alpo.ge/lean',
                 'git_sha': git_sha, 'source_tarball_sha256': source_sha,
                 'excluded_duplicate_train_files': [str(f.relative_to(source)) for f in duplicates],

@@ -7,6 +7,7 @@ unbracketed minima and underdetermined fits are explicitly rejected.
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 import numpy as np
 import matplotlib
@@ -199,6 +200,10 @@ area_plot=False
 if args.area_dir:
     area_files=sorted(args.area_dir.glob('*.json'))
     payloads=[json.loads(p.read_text()) for p in area_files]
+    def checkpoint_order(payload):
+        match = re.search(r'_([0-9.]+e[+-]?[0-9]+)_d([0-9]+)$', payload['checkpoint'], re.I)
+        return (float(match.group(1)), int(match.group(2))) if match else (float('inf'), 0)
+    payloads.sort(key=checkpoint_order)
     expected_areas = set(manifest.get('file_level_areas', {}))
     if any(set(p.get('file_level_areas', {})) != expected_areas or p.get('tokenizer_sha256') != expected_sha for p in payloads):
         raise ValueError('Area results do not match the canonical tokenizer and split')
@@ -214,7 +219,11 @@ else: card += ['Directory difficulty plot pending per-checkpoint evaluation.',''
 for regime in ('fresh','repeated'):
     fit=fits[regime]
     if 'params_exponent' in fit:
-        card += [f"For {regime} data, the fitted exponents are N ∝ C^{fit['params_exponent']:.3f} and D ∝ C^{fit['tokens_exponent']:.3f}. Bootstrap confidence intervals and window sensitivity are in the accompanying results files.", '']
+        intervals = ''
+        if 'params_exponent_ci' in fit:
+            ni, di = fit['params_exponent_ci'], fit['tokens_exponent_ci']
+            intervals = f" Bootstrap 95% intervals are [{ni[0]:.3f}, {ni[1]:.3f}] and [{di[0]:.3f}, {di[1]:.3f}], respectively."
+        card += [f"For {regime} data, the fitted exponents are N ∝ C^{fit['params_exponent']:.3f} and D ∝ C^{fit['tokens_exponent']:.3f}." + intervals, '']
 card += ['| FLOPs | Effective parameters (95% CI) | Training tokens | Tokens/parameter | Fitted BPB | Best measured BPB | Passes |','| ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
 for r in optimal:
     card.append(f"| {r['flops']:.3g} | {r['effective_params']:,.0f} ({r['params_ci_low']:,.0f}–{r['params_ci_high']:,.0f}) | {r['tokens']:,.0f} | {r['ratio']:.2f} | {r['val_bpb']:.4f} | {r['best_measured_bpb']:.4f} | {r['passes']:.2f} |")

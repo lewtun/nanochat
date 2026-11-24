@@ -29,3 +29,19 @@ def test_leaf_split_with_three_file_level_fallbacks_is_rerunnable(tmp_path):
     assert manifest['validation_shard'] == manifest['parquet_files'][-1]
     prepare(source, out, 42, 3)
     assert (out / 'data_manifest.json').read_text() == original
+
+
+def test_validation_content_is_removed_from_training(tmp_path):
+    import pyarrow.parquet as pq
+    source = tmp_path / 'src'
+    for name, text in [('Shared/Area/A/x.lean', 'identical'), ('Shared/Area/B/y.lean', 'identical'), ('Shared/Area/B/z.lean', 'different')]:
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    output = tmp_path / 'output'
+    prepare(source, output, 42, 100)
+    manifest = json.loads((output / 'data_manifest.json').read_text())
+    assert manifest['excluded_duplicate_train_files'] == ['Shared/Area/B/y.lean']
+    train = pq.read_table(output / 'base_data' / manifest['parquet_files'][0])['text'].to_pylist()
+    assert train == ['different']
+    assert manifest['git_sha']

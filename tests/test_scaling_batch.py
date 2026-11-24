@@ -1,5 +1,5 @@
 import pytest
-from nanochat.scaling import cap_batch_for_steps, scaling_token_horizon
+from nanochat.scaling import cap_batch_for_steps, scaling_token_horizon, compatible_device_batch
 
 
 def test_batch_cap_meets_horizon_and_preserves_smaller_batch():
@@ -41,3 +41,11 @@ def test_flop_horizon_is_used_only_for_budget_limited_runs():
     assert scaling_token_horizon(3_000_000, 12, 1e15, 1e8, 0) == 36_000_000
     with pytest.raises(ValueError):
         scaling_token_horizon(3_000_000, 12, -1, 1e8, 500)
+
+
+@pytest.mark.parametrize("world_size", range(1, 9))
+def test_device_batch_is_largest_compatible_divisor(world_size):
+    unit = 2048 * world_size
+    for count in (1, 2, 11, 35, 100):
+        selected = compatible_device_batch(unit * count, 2048, world_size, 8)
+        assert selected == max(i for i in range(1, min(count, 8) + 1) if count % i == 0)

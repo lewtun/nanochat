@@ -491,6 +491,17 @@ with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=".provenance.", 
     os.fsync(handle.fileno())
     temporary = Path(handle.name)
 os.replace(temporary, target)
+# Keep a provenance record for every job, including resumed labels.
+job_key = payload["job_id"] if payload["job_id"] != "unknown" else payload["created_at"].replace(":", "-")
+job_path = target.parent / "provenance_jobs" / (job_key + ".json")
+job_path.parent.mkdir(exist_ok=True)
+with tempfile.NamedTemporaryFile("w", dir=job_path.parent, prefix=".job.", suffix=".tmp", delete=False) as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+    job_temp = Path(handle.name)
+os.replace(job_temp, job_path)
 PY
 }
 

@@ -27,7 +27,7 @@ import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.scaling import cap_batch_for_steps, scaling_token_horizon
+from nanochat.scaling import cap_batch_for_steps, scaling_token_horizon, compatible_device_batch
 from nanochat.common import compute_init, compute_cleanup, print0, DummyTracker, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
@@ -317,10 +317,7 @@ if total_batch_size == -1:
     total_batch_size = max(total_batch_size, minimum_batch)
     if total_batch_size % minimum_batch:
         total_batch_size = (total_batch_size // minimum_batch) * minimum_batch
-    max_device_batch = total_batch_size // minimum_batch
-    device_batch = min(args.device_batch_size, max_device_batch)
-    while total_batch_size % (device_batch * minimum_batch):
-        device_batch -= 1
+    device_batch = compatible_device_batch(total_batch_size, args.max_seq_len, ddp_world_size, args.device_batch_size)
     if device_batch != args.device_batch_size:
         print0(f"Reducing device batch size from {args.device_batch_size} to {device_batch} to fit the automatic total batch")
         args.device_batch_size = device_batch

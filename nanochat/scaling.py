@@ -26,6 +26,17 @@ def cap_batch_for_steps(batch, flops, flops_per_token, min_steps, minimum_batch)
     return min(max(minimum_batch, math.floor(batch / minimum_batch) * minimum_batch), cap)
 
 
+def compatible_device_batch(total_batch, sequence_len, world_size, limit):
+    """Choose the largest device batch that divides the distributed batch."""
+    unit = sequence_len * world_size
+    if total_batch < unit or total_batch % unit or limit < 1:
+        raise ValueError("Total batch must be a positive multiple of the distributed sequence length")
+    device_batch = min(limit, total_batch // unit)
+    while total_batch % (device_batch * unit):
+        device_batch -= 1
+    return device_batch
+
+
 def fit_local_isoflop(params, losses):
     """Fit exactly two neighbors on either side of the observed minimum."""
     import numpy as np
