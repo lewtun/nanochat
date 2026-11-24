@@ -27,7 +27,13 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     assert [v['status'] for v in status.values()].count('invalid') == 1
     fits = json.loads((output / 'fits.json').read_text())
     assert fits['fresh']['n'] == 3
+    assert fits['all_budgets']['n'] == 3
+    assert 'mix fresh and repeated' in fits['all_budgets']['note']
     assert fits['data_constrained']['status'] != 'fit'
+    selection = json.loads((output / 'selected_model.json').read_text())
+    assert selection['budget'] == 1e17
+    assert selection['depth'] == 4
+    assert selection['final_validation_bpb'] == .5
 
     card = (output / 'model_card_results.md').read_text()
     assert '100 documents and 1,000 text tokens' in card

@@ -55,6 +55,7 @@ for path in args.results:
             seen_points[point] = name
             row = {k: float(r[k]) for k in ('flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb')}
             row['run_name'] = name
+            row['depth'] = int(r['depth'])
             rows.append(row)
 if not rows:
     raise SystemExit('No results')
@@ -142,7 +143,23 @@ if not optimal:
     raise SystemExit('No valid budget fits; see budget_status.json and extend the depth grid')
 with (args.output_dir/'optimal.csv').open('w',newline='') as f:
     writer = csv.DictWriter(f,fieldnames=list(optimal[0])); writer.writeheader(); writer.writerows(optimal)
+largest = max(optimal, key=lambda r: r['flops'])
+selected = min((r for r in rows if r['flops_budget'] == largest['flops']),
+               key=lambda r: abs(np.log(r['effective_params'] / largest['effective_params'])))
+selection = {'budget': largest['flops'], 'depth': selected['depth'], 'run_name': selected['run_name'],
+             'effective_params': selected['effective_params'], 'fitted_optimum_params': largest['effective_params'],
+             'final_validation_bpb': selected['val_bpb'],
+             'selection_rule': 'nearest tested effective parameter count in log space to the fitted optimum at the largest valid budget'}
+(args.output_dir/'selected_model.json').write_text(json.dumps(selection, indent=2) + '\n')
 fits = {}
+if len(optimal) >= 3:
+    all_x = np.log10([r['flops'] for r in optimal])
+    fits['all_budgets'] = {
+        'n': len(optimal),
+        'params_exponent': float(np.polyfit(all_x, np.log10([r['effective_params'] for r in optimal]), 1)[0]),
+        'tokens_exponent': float(np.polyfit(all_x, np.log10([r['tokens'] for r in optimal]), 1)[0]),
+        'note': 'Combined descriptive fit; may mix fresh and repeated data regimes.',
+    }
 for label, group in [('fresh', [r for r in optimal if r['passes'] <= 1.0]), ('repeated', [r for r in optimal if r['passes'] > 1.0])]:
     if len(group) < 3:
         fits[label] = {'status':'insufficient budgets', 'n':len(group)}
@@ -269,6 +286,7 @@ if args.area_dir:
         im=ax.imshow(matrix,aspect='auto',interpolation='nearest',vmax=np.nanpercentile(matrix,99)); ax.set_yticks(range(len(areas)),[a + (' [' + manifest['area_evaluation_set'][a] + ']') + (' *' if a in expected_areas else '') for a in areas],fontsize=4); ax.set_xticks(range(len(payloads)),[p['checkpoint'] for p in payloads],rotation=90,fontsize=6); ax.set(title='Held-out difficulty (unseen = transfer; * file-level split)',xlabel='Checkpoint'); fig.colorbar(im,ax=ax,label='Bits per byte (99th percentile cap)'); fig.savefig(plot_dir/'directory_difficulty.png'); plt.close(fig); area_plot=True
 card=['## Scaling-law results','','We trained on the Lean corpus with held-out source directories. The figures report validation bits per byte, training compute and effective parameters (transformer matrices plus the language-model head).','',
       '![IsoFLOP curves](assets/isoflop.png)','','![Best loss against compute](assets/best_loss.png)','','![Optimal model size and training tokens](assets/optimal_nd.png)','','![Optimal tokens per parameter](assets/tokens_per_param.png)','']
+card += [f"The selected checkpoint is depth {selection['depth']} at {selection['budget']:.3g} training FLOPs, the tested model closest in log parameter count to the fitted optimum at the largest valid budget. Its final-checkpoint matched-validation loss is {selection['final_validation_bpb']:.4f} bits per byte.", '']
 if manifest.get('train') and manifest.get('validation'):
     train, val = manifest['train'], manifest['validation']
     card += [f"The training split contains {train['files']:,} documents and {train['tokens']:,} text tokens. Matched validation contains {val['files']:,} documents. The train–validation area distribution has total-variation distance {manifest['train_validation_area_tv']:.3f}.", '']
