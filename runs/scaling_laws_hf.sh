@@ -11,28 +11,20 @@ RUN_LABEL="${RUN_LABEL:-}"
 TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-}"
 TRACKIO_BUCKET="${TRACKIO_BUCKET:-}"
 TRAIN_IMAGE="${TRAIN_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}"
-TRAIN_FLAVOR="h200x8"
-NPROC_PER_NODE=8
+TRAIN_FLAVOR="${TRAIN_FLAVOR:-h200x8}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+DATA_PREFIX="${DATA_PREFIX:-base_data_climbmix}"
+CORE_METRIC="${CORE_METRIC:-1}"
+EVAL_TOKENS="${EVAL_TOKENS:-52428800}"
+MIN_TOKEN_PARAM_RATIO="${MIN_TOKEN_PARAM_RATIO:-1}"
+MAX_TOKEN_PARAM_RATIO="${MAX_TOKEN_PARAM_RATIO:-1000}"
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 
-FLOPS_BUDGETS=(
-    1e18
-    2.15e18
-    4.64e18
-    1e19
-)
+read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
+read -r -a DEPTHS <<< "${DEPTHS:-10 12 14 16 18 20}"
 
-DEPTHS=(
-    10
-    12
-    14
-    16
-    18
-    20
-)
-
-RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,num_iterations,tokens_trained,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
+RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,tokens_trained,unique_tokens,passes,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -141,7 +133,9 @@ validate_settings() {
     [[ "$HF_BUCKET" == */* ]] || die "HF_BUCKET must be namespace/name"
     [[ "$TRACKIO_BUCKET" == */* ]] || die "TRACKIO_BUCKET must be namespace/name"
     [[ "$TRACKIO_SPACE_ID" == */* ]] || die "TRACKIO_SPACE_ID must be namespace/name"
-    [[ "$TRAIN_FLAVOR" == "h200x8" && "$NPROC_PER_NODE" == "8" ]] || die "Scaling requires h200x8 with eight processes"
+    [[ "$NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]] || die "NPROC_PER_NODE must be a positive integer"
+    [[ "$DATA_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid DATA_PREFIX"
+    [[ "$CORE_METRIC" == 0 || "$CORE_METRIC" == 1 ]] || die "CORE_METRIC must be 0 or 1"
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
     run_python - "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
 import re
@@ -214,6 +208,14 @@ expected = {
     "tokenizer_vocab_size": 32768,
     "tokenizer_max_chars": 2_000_000_000,
 }
+if manifest.get("dataset") == "alpo.ge/lean":
+    assert manifest.get("schema_version") == 1 and manifest.get("status") == "COMPLETE"
+    files = manifest.get("parquet_files", [])
+    assert len(files) > 1 and len(files) == len(set(files))
+    assert files == sorted(files) and manifest["validation_shard"] == files[-1]
+    assert manifest["train"]["tokens"] > 0
+    print(manifest.get("git_sha", "rh-preparation"))
+    raise SystemExit
 for key, value in expected.items():
     if manifest.get(key) != value:
         raise SystemExit(f"Invalid data manifest: {key}={manifest.get(key)!r}, expected {value!r}")
@@ -263,13 +265,13 @@ assert bucket in text and mount in text, f"Expected {bucket} mounted at {mount}:
 
 parse_training_log() {
     local log_file="$1" flops_budget="$2" depth="$3" run_name="$4" train_time="$5"
-    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" <<'PY'
+    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" <<'PY'
 import csv
 import math
 import re
 import sys
 
-log_path, flops_budget, depth_text, run_name, train_time_text = sys.argv[1:]
+log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text = sys.argv[1:]
 text = open(log_path, encoding="utf-8", errors="replace").read()
 
 def last(pattern, label, flags=re.MULTILINE):
@@ -302,7 +304,8 @@ num_iterations = integer(
 batch_size = integer(r"Total batch size\s+([\d,]+)\s+=>", "total batch size")
 actual_flops = finite(r"Total training FLOPs estimate:\s+([0-9.eE+-]+)", "actual FLOPs", positive=True)
 val_bpb = finite(r"Validation bpb:\s+([0-9.eE+-]+)", "validation BPB", positive=True)
-core_score = finite(r"CORE metric:\s+([0-9.eE+-]+)", "CORE score")
+core_matches = re.findall(r"CORE metric:\s+([0-9.eE+-]+)", text)
+core_score = float(core_matches[-1]) if core_matches else None
 throughput = integer(r"tok/sec:\s+([\d,]+)", "throughput")
 mfu = finite(r"bf16_mfu:\s+([0-9.eE+-]+)", "MFU", positive=True)
 depth = int(depth_text)
@@ -315,12 +318,15 @@ row = [
     flops_budget,
     f"{actual_flops:.12g}",
     depth,
-    depth * 64,
+    ((depth * 64 + 127) // 128) * 128,
     *params,
+    params[2] + params[3],
     num_iterations,
     num_iterations * batch_size,
+    min(num_iterations * batch_size, int(corpus_tokens_text)) if int(corpus_tokens_text) else "",
+    f"{num_iterations * batch_size / int(corpus_tokens_text):.12g}" if int(corpus_tokens_text) else "",
     f"{val_bpb:.12g}",
-    f"{core_score:.12g}",
+    f"{core_score:.12g}" if core_score is not None else "",
     throughput,
     f"{mfu:.12g}",
     train_time,
@@ -473,7 +479,8 @@ PY
 stage_training_assets() {
     local runtime_base="$1"
     log "Staging training assets from the mounted bucket into local Job storage"
-    run_python - "$NANOCHAT_MOUNT" "$runtime_base" <<'PY'
+    run_python - "$NANOCHAT_MOUNT" "$runtime_base" "$DATA_PREFIX" <<'PY'
+import json
 import os
 import shutil
 import sys
@@ -484,7 +491,9 @@ import pyarrow.parquet as pq
 
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
-shard_names = [f"shard_{index:05d}.parquet" for index in range(170)] + ["shard_06542.parquet"]
+manifest = json.loads((source / "data_manifest.json").read_text())
+shard_names = manifest["parquet_files"]
+prefix = sys.argv[3]
 
 def copy_with_retries(source_path, target_path, attempts=5):
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -508,9 +517,9 @@ def copy_with_retries(source_path, target_path, attempts=5):
             print(f"Retrying mounted-bucket read for {source_path.name} after {error!r} ({attempt}/{attempts})")
             time.sleep(delay)
 
-data_target = target / "base_data_climbmix"
+data_target = target / prefix
 for index, name in enumerate(shard_names, start=1):
-    source_path = source / "base_data_climbmix" / name
+    source_path = source / prefix / name
     target_path = data_target / name
     copy_with_retries(source_path, target_path)
     parquet = pq.ParquetFile(target_path)
@@ -542,6 +551,23 @@ run_point() {
         return
     fi
 
+    local point_info ratio
+    if [[ -f "$RESULTS_DIR/skipped.csv" ]] && awk -F, -v f="$flops_budget" -v d="$depth" '$1 == f && $2 == d { found=1 } END { exit !found }' "$RESULTS_DIR/skipped.csv"; then
+        log "Skipping previously excluded point $point_name"
+        return
+    fi
+    point_info="$(run_python -m scripts.scaling_point --depth "$depth" --flops "$flops_budget" --vocab-size "$TOKENIZER_VOCAB_SIZE")"
+    ratio="$(run_python -c 'import json,sys; print(json.loads(sys.argv[1])["tokens_per_param"])' "$point_info")"
+    if ! run_python - "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" <<'PYRATIO'
+import sys
+ratio, lower, upper = map(float, sys.argv[1:])
+raise SystemExit(0 if lower <= ratio <= upper else 1)
+PYRATIO
+    then
+        log "Skipping $point_name: estimated tokens:params $ratio outside [$MIN_TOKEN_PARAM_RATIO, $MAX_TOKEN_PARAM_RATIO]"
+        printf '%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" >> "$RESULTS_DIR/skipped.csv"
+        return
+    fi
     if (( depth >= 28 )); then
         device_batch=8
     elif (( depth >= 20 )); then
@@ -552,8 +578,8 @@ run_point() {
 
     horizon_args=(--target-flops="$flops_budget" --target-param-data-ratio=-1)
     train_args=(
-        --eval-tokens=52428800
-        --core-metric-every=999999
+        --eval-tokens="$EVAL_TOKENS"
+        --core-metric-every="$([[ "$CORE_METRIC" == 1 ]] && echo 999999 || echo -1)"
         --core-metric-max-per-task=-1
         --sample-every=-1
         --save-every=-1
@@ -562,7 +588,7 @@ run_point() {
     log "Starting $run_name with $NPROC_PER_NODE-process torchrun"
     start_time="$(date +%s)"
     set +e
-    NANOCHAT_BASE_DIR="$runtime_base" OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" -m scripts.base_train -- \
+    NANOCHAT_BASE_DIR="$runtime_base" NANOCHAT_DATA_DIR="$runtime_base/$DATA_PREFIX" OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" -m scripts.base_train -- \
         --depth="$depth" \
         "${horizon_args[@]}" \
         --run="$run_name" \
@@ -579,6 +605,15 @@ run_point() {
     fi
 
     row="$(parse_training_log "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time")"
+    local checkpoint_source="$runtime_base/base_checkpoints/$model_tag"
+    local checkpoint_dest="$RESULTS_DIR/checkpoints/$run_name"
+    mkdir -p "$checkpoint_dest"
+    local -a models=("$checkpoint_source"/model_*.pt)
+    [[ -f "${models[0]}" && ${#models[@]} -eq 1 ]] || die "Expected one final model checkpoint"
+    local model_file="${models[0]}" suffix="${models[0]##*/model_}"
+    [[ -f "$checkpoint_source/meta_${suffix%.pt}.json" ]] || die "Missing final checkpoint metadata"
+    cp "$model_file" "$checkpoint_dest/"
+    cp "$checkpoint_source/meta_${suffix%.pt}.json" "$checkpoint_dest/"
     printf '%s\n' "$row" >> "$RESULTS_FILE"
     cleanup_checkpoint "$runtime_base/base_checkpoints/$model_tag" "$runtime_base"
     log "Completed $point_name"
@@ -608,7 +643,15 @@ PY
     data_manifest_path="$NANOCHAT_MOUNT/data_manifest.json"
     [[ -f "$data_manifest_path" ]] || die "Missing $data_manifest_path"
     DATA_MANIFEST_GIT_SHA="$(validate_data_manifest_stream < "$data_manifest_path")"
-    export DATA_MANIFEST_GIT_SHA
+    run_python - "$data_manifest_path" "$DATA_PREFIX" <<'PYDATA'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+if manifest.get("data_prefix", "base_data_climbmix") != sys.argv[2]:
+    raise SystemExit("DATA_PREFIX does not match the manifest")
+PYDATA
+    TRAIN_CORPUS_TOKENS="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("train", {}).get("tokens", 0))' "$data_manifest_path")"
+    TOKENIZER_VOCAB_SIZE="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1]))["tokenizer_vocab_size"])' "$data_manifest_path")"
+    export DATA_MANIFEST_GIT_SHA TRAIN_CORPUS_TOKENS TOKENIZER_VOCAB_SIZE
     [[ -s "$NANOCHAT_MOUNT/tokenizer/tokenizer.pkl" ]] || die "Missing tokenizer.pkl"
     [[ -s "$NANOCHAT_MOUNT/tokenizer/token_bytes.pt" ]] || die "Missing token_bytes.pt"
 
@@ -639,8 +682,10 @@ with open(sys.argv[1], newline="") as handle:
     print(sum(1 for _ in csv.DictReader(handle)))
 PY
 )"
+    local skipped_count=0
+    [[ ! -f "$RESULTS_DIR/skipped.csv" ]] || skipped_count="$(wc -l < "$RESULTS_DIR/skipped.csv")"
     expected_rows=$((${#FLOPS_BUDGETS[@]} * ${#DEPTHS[@]}))
-    [[ "$row_count" -eq "$expected_rows" ]] || die "Expected $expected_rows result rows, found $row_count"
+    [[ $((row_count + skipped_count)) -eq "$expected_rows" ]] || die "Expected $expected_rows points, found $row_count completed and $skipped_count skipped"
     write_status COMPLETE
     release_writer_lock
     trap - EXIT
@@ -680,6 +725,13 @@ launcher_main() {
         --env "TRAIN_FLAVOR=$TRAIN_FLAVOR"
         --env "NPROC_PER_NODE=$NPROC_PER_NODE"
         --env "NANOCHAT_MOUNT=$NANOCHAT_MOUNT"
+        --env "DATA_PREFIX=$DATA_PREFIX"
+        --env "CORE_METRIC=$CORE_METRIC"
+        --env "EVAL_TOKENS=$EVAL_TOKENS"
+        --env "MIN_TOKEN_PARAM_RATIO=$MIN_TOKEN_PARAM_RATIO"
+        --env "MAX_TOKEN_PARAM_RATIO=$MAX_TOKEN_PARAM_RATIO"
+        --env "FLOPS_BUDGETS=${FLOPS_BUDGETS[*]}"
+        --env "DEPTHS=${DEPTHS[*]}"
         --volume "hf://buckets/${HF_BUCKET}:${NANOCHAT_MOUNT}:rw"
         --
         "$TRAIN_IMAGE" bash -lc "$remote_command"

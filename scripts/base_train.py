@@ -266,11 +266,12 @@ def get_scaling_params(m):
     scaling_params = params_counts['transformer_matrices'] + params_counts['lm_head']
     return scaling_params
 num_scaling_params = get_scaling_params(model)
-target_tokens = int(args.target_param_data_ratio * num_scaling_params) # optimal tokens for the model we are about to train
+scaling_ratio = args.target_param_data_ratio if args.target_param_data_ratio > 0 else 12.0
+target_tokens = int(scaling_ratio * num_scaling_params) # optimal tokens for the model we are about to train
 
 # Our reference model is d12, this is where a lot of hyperparameters are tuned and then transfered to higher depths (muP style)
 d12_ref = build_model_meta(12) # creates the model on meta device
-D_REF = args.target_param_data_ratio * get_scaling_params(d12_ref) # compute-optimal d12 training horizon in tokens (measured empirically)
+D_REF = scaling_ratio * get_scaling_params(d12_ref) # compute-optimal d12 training horizon in tokens (measured empirically)
 B_REF = 2**19 # optimal batch size at d12 ~= 524,288 tokens (measured empirically)
 
 # 2) Now that we have the token horizon, we can calculate the optimal batch size
@@ -281,6 +282,19 @@ if total_batch_size == -1:
     batch_size_ratio = target_tokens / D_REF
     predicted_batch_size = B_REF * batch_size_ratio ** 0.383
     total_batch_size = 2 ** round(math.log2(predicted_batch_size)) # clamp to nearest power of 2 for efficiency
+    # A batch must contain at least one full sequence per rank. Choose the
+    # largest compatible device batch up to the requested memory limit.
+    minimum_batch = args.max_seq_len * ddp_world_size
+    total_batch_size = max(total_batch_size, minimum_batch)
+    if total_batch_size % minimum_batch:
+        total_batch_size = math.ceil(total_batch_size / minimum_batch) * minimum_batch
+    max_device_batch = total_batch_size // minimum_batch
+    device_batch = min(args.device_batch_size, max_device_batch)
+    while total_batch_size % (device_batch * minimum_batch):
+        device_batch -= 1
+    if device_batch != args.device_batch_size:
+        print0(f"Reducing device batch size from {args.device_batch_size} to {device_batch} to fit the automatic total batch")
+        args.device_batch_size = device_batch
     print0(f"Auto-computed optimal batch size: {total_batch_size:,} tokens")
 
 # 3) Knowing the batch size, we can now calculate a learning rate correction (bigger batch size allows higher learning rates)

@@ -1,0 +1,120 @@
+"""Prepare a deterministic, directory-held-out Lean corpus for nanochat.
+
+Run with --source .../lean/src --output .../runtime, then train the tokenizer:
+NANOCHAT_BASE_DIR=.../runtime NANOCHAT_DATA_DIR=.../runtime/base_data_rh \
+  python -m scripts.tok_train --vocab-size 16384
+Finally run this script with --count-tokens to add tokenizer counts to the manifest.
+"""
+import argparse
+from collections import defaultdict
+import json
+from pathlib import Path
+import random
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+
+def area(path):
+    parts = path.parent.parts
+    return '/'.join(parts[:3 if parts and parts[0] == 'Development' else 2]) or '(root)'
+
+
+def prepare(source, output, seed, shard_size):
+    manifest_path = output / 'data_manifest.json'
+    if manifest_path.exists():
+        old = json.loads(manifest_path.read_text())
+        if old.get('seed') != seed or old.get('shard_size') != shard_size:
+            raise ValueError('Existing manifest has different preparation settings')
+        if not all((output / old['data_prefix'] / name).is_file() for name in old['parquet_files']):
+            raise FileNotFoundError('Existing manifest has missing shards')
+        print(f'Using existing prepared data: {manifest_path}')
+        return
+    files = sorted(source.rglob('*.lean'))
+    if not files:
+        raise ValueError('No Lean files found')
+    dirs = {f.parent for f in files}
+    ancestors = {parent for directory in dirs for parent in directory.parents}
+    leaves = dirs - ancestors
+    eligible = defaultdict(lambda: defaultdict(int))
+    area_bytes = defaultdict(int)
+    for f in files:
+        relative = f.relative_to(source)
+        size = f.stat().st_size
+        area_bytes[area(relative)] += size
+        if f.parent in leaves:
+            eligible[area(relative)][f.parent] += size
+    # The minimum feasible coverage minimizes the deviation from the 3% target.
+    held = {min(dirsizes, key=lambda d: (dirsizes[d], str(d))) for dirsizes in eligible.values()}
+    train = [f for f in files if f.parent not in held]
+    val = [f for f in files if f.parent in held]
+    random.Random(seed).shuffle(train)
+    data = output / 'base_data_rh'
+    data.mkdir(parents=True, exist_ok=True)
+    if any(data.glob('*.parquet')):
+        raise FileExistsError(f'{data} already contains shards; use a fresh output directory')
+    names = []
+    for i in range(0, len(train), shard_size):
+        name = f'shard_{i // shard_size:05d}.parquet'
+        write(data / name, train[i:i + shard_size])
+        names.append(name)
+    name = 'shard_99999.parquet'
+    write(data / name, val)
+    names.append(name)
+    def stats(items):
+        return {'files': len(items), 'bytes': sum(f.stat().st_size for f in items)}
+    manifest = {'schema_version': 1, 'status': 'PREPARED', 'dataset': 'alpo.ge/lean',
+                'seed': seed, 'shard_size': shard_size, 'data_prefix': 'base_data_rh', 'parquet_files': names,
+                'num_train_shards': len(names)-1, 'validation_shard': name,
+                'held_out_directories': sorted(str(d.relative_to(source)) for d in held),
+                'validation_files': [str(f.relative_to(source)) for f in val],
+                'uncovered_areas': sorted(set(area_bytes) - set(eligible)),
+                'train': stats(train), 'validation': stats(val),
+                'area_bytes': dict(sorted(area_bytes.items()))}
+    (output / 'data_manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print(json.dumps({k: manifest[k] for k in ('train', 'validation', 'uncovered_areas')}, indent=2))
+
+
+def write(path, files):
+    writer = pq.ParquetWriter(path, pa.schema([('text', pa.string())]), compression='zstd')
+    try:
+        for start in range(0, len(files), 256):
+            texts = [f.read_text(encoding='utf-8') for f in files[start:start+256]]
+            writer.write_table(pa.table({'text': texts}))
+    finally:
+        writer.close()
+
+
+def count(output):
+    from nanochat.tokenizer import RustBPETokenizer
+    tokenizer = RustBPETokenizer.from_directory(output / 'tokenizer')
+    path = output / 'data_manifest.json'
+    manifest = json.loads(path.read_text())
+    for split, names in [('train', manifest['parquet_files'][:-1]), ('validation', manifest['parquet_files'][-1:])]:
+        tokens = 0
+        for name in names:
+            parquet = pq.ParquetFile(output / manifest['data_prefix'] / name)
+            for batch in parquet.iter_batches(batch_size=256, columns=['text']):
+                tokens += sum(len(ids) for ids in tokenizer.encode(batch.column(0).to_pylist()))
+            print(f'{split} {name}: {tokens:,} tokens', flush=True)
+        manifest[split]['tokens'] = tokens
+        manifest[split]['bytes_per_token'] = manifest[split]['bytes'] / tokens
+    manifest['tokenizer_vocab_size'] = tokenizer.get_vocab_size()
+    manifest['status'] = 'COMPLETE'
+    path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source', type=Path)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--shard-size', type=int, default=10000)
+    parser.add_argument('--count-tokens', action='store_true')
+    args = parser.parse_args()
+    if args.count_tokens:
+        count(args.output)
+    else:
+        if args.source is None or args.shard_size <= 0:
+            parser.error('--source and positive --shard-size required')
+        prepare(args.source, args.output, args.seed, args.shard_size)

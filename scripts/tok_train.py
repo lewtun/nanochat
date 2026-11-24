@@ -54,7 +54,7 @@ print(f"Training time: {train_time:.2f}s")
 # -----------------------------------------------------------------------------
 # Save the tokenizer to disk
 base_dir = get_base_dir()
-tokenizer_dir = os.path.join(base_dir, "tokenizer")
+tokenizer_dir = os.environ.get("NANOCHAT_TOKENIZER_DIR", os.path.join(base_dir, "tokenizer"))
 tokenizer.save(tokenizer_dir)
 
 # -----------------------------------------------------------------------------
