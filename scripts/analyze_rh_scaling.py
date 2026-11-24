@@ -66,8 +66,8 @@ with (args.output_dir/'tokens_per_param.csv').open('w',newline='') as f:
     w=csv.DictWriter(f,fieldnames=['flops','ratio','passes','repeat_factor']); w.writeheader()
     w.writerows({k:r[k] for k in w.fieldnames} for r in optimal)
 # Use measured text exposure for the paper's unique-data and repetition terms.
-if len(rows) < 8:
-    fits['data_constrained']={'status':'insufficient points for seven fitted constants'}
+if len(rows) < 8 or sum(r['repeat_factor'] > 1.001 for r in rows) < 3:
+    fits['data_constrained']={'status':'insufficient points or repeated-data observations for seven fitted constants'}
 else:
     n=np.array([r['effective_params']/1e6 for r in rows]); d=np.array([r['text_tokens_trained']/1e6 for r in rows]);
     ud=np.array([r['unique_tokens']/1e6 for r in rows]); loss=np.array([r['val_bpb'] for r in rows])
