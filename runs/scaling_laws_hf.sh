@@ -38,7 +38,8 @@ export DATA_PREFIX EVAL_TOKENS CORE_METRIC MIN_TOKEN_PARAM_RATIO MAX_TOKEN_PARAM
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 TRAIN_SEED="${TRAIN_SEED:-42}"
 EFFICIENT_BATCH="${EFFICIENT_BATCH:-1}"
-export TRAIN_SEED EFFICIENT_BATCH
+WEIGHT_DECAY="${WEIGHT_DECAY:-0.28}"
+export TRAIN_SEED EFFICIENT_BATCH WEIGHT_DECAY
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
@@ -180,6 +181,12 @@ except ValueError:
 if not (math.isfinite(lo) and math.isfinite(hi) and 0 < lo <= hi):
     raise SystemExit("Token:parameter bounds must satisfy 0 < MIN <= MAX")
 PYWINDOW
+    run_python - "$WEIGHT_DECAY" <<'PYDECAY'
+import math, sys
+value = float(sys.argv[1])
+if not math.isfinite(value) or value <= 0:
+    raise SystemExit('WEIGHT_DECAY must be finite and positive')
+PYDECAY
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
     run_python - "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
 import re
@@ -471,6 +478,7 @@ payload = {
     "min_steps": int(os.environ["MIN_STEPS"]),
     "train_seed": int(os.environ["TRAIN_SEED"]),
     "efficient_batch": os.environ["EFFICIENT_BATCH"] == "1",
+    "weight_decay": float(os.environ["WEIGHT_DECAY"]),
     "data_prefix": os.environ["DATA_PREFIX"],
     "eval_tokens": int(os.environ["EVAL_TOKENS"]),
     "core_metric": os.environ["CORE_METRIC"] == "1",
@@ -493,7 +501,7 @@ if target.exists() and has_rows:
     old = json.loads(target.read_text())
     keys = ("asset_prefix", "data_prefix", "head_dim", "min_steps", "document_eos", "eval_tokens",
             "nproc_per_node", "tokenizer_sha256", "tokenizer_bucket_path", "core_metric", "git_sha",
-            "train_seed", "efficient_batch", "data_manifest_git_sha", "data_manifest_sha256")
+            "train_seed", "efficient_batch", "weight_decay", "data_manifest_git_sha", "data_manifest_sha256")
     changed = [key for key in keys if old.get(key) != payload[key]]
     if changed:
         raise SystemExit(f"Existing label has incompatible provenance: {', '.join(changed)}; use a new label or resume with GIT_REF={old.get('git_sha')}")
@@ -730,6 +738,7 @@ PYSTEPS
         --depth="$depth" \
         --head-dim="$HEAD_DIM" \
         --seed="$TRAIN_SEED" \
+        --weight-decay="$WEIGHT_DECAY" \
         --min-steps="$MIN_STEPS" \
         --tokenizer-sha256="$TOKENIZER_SHA256" \
         --tokenizer-bucket-path="$TOKENIZER_BUCKET_PATH" \
@@ -927,6 +936,7 @@ launcher_main() {
         --env "MIN_STEPS=$MIN_STEPS"
         --env "TRAIN_SEED=$TRAIN_SEED"
         --env "EFFICIENT_BATCH=$EFFICIENT_BATCH"
+        --env "WEIGHT_DECAY=$WEIGHT_DECAY"
         --env "CORE_METRIC=$CORE_METRIC"
         --env "EVAL_TOKENS=$EVAL_TOKENS"
         --env "MIN_TOKEN_PARAM_RATIO=$MIN_TOKEN_PARAM_RATIO"
