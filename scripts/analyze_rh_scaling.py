@@ -205,7 +205,8 @@ if args.area_dir:
         return (float(match.group(1)), int(match.group(2))) if match else (float('inf'), 0)
     payloads.sort(key=checkpoint_order)
     expected_areas = set(manifest.get('file_level_areas', {}))
-    if any(set(p.get('file_level_areas', {})) != expected_areas or p.get('tokenizer_sha256') != expected_sha for p in payloads):
+    if any(set(p.get('file_level_areas', {})) != expected_areas or p.get('tokenizer_sha256') != expected_sha
+           or p.get('area_evaluation_set') != manifest['area_evaluation_set'] for p in payloads):
         raise ValueError('Area results do not match the canonical tokenizer and split')
     if payloads:
         areas=sorted(manifest['area_split_bytes'])
