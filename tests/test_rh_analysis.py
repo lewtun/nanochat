@@ -6,7 +6,7 @@ import sys
 
 
 def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
-    manifest = {'document_eos': True, 'asset_prefix': 'rh', 'tokenizer_sha256': 'abc', 'tokenizer_bucket_path': 'bucket/tokenizer'}
+    manifest = {'document_eos': True, 'asset_prefix': 'rh', 'tokenizer_sha256': 'abc', 'tokenizer_bucket_path': 'bucket/tokenizer', 'train': {'files': 100, 'tokens': 1000}, 'validation': {'files': 10}, 'train_validation_area_tv': .03}
     manifest_path = tmp_path / 'manifest.json'
     manifest_path.write_text(json.dumps(manifest))
     fields = ['asset_prefix', 'head_dim', 'document_eos', 'tokenizer_sha256', 'tokenizer_bucket_path', 'batch_lr_scale', 'weight_decay_scaled', 'validation_mode', 'model_dim', 'depth', 'num_iterations', 'flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb']
@@ -28,3 +28,7 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     fits = json.loads((output / 'fits.json').read_text())
     assert fits['fresh']['n'] == 3
     assert fits['data_constrained']['status'] != 'fit'
+
+    card = (output / 'model_card_results.md').read_text()
+    assert '100 documents and 1,000 text tokens' in card
+    assert 'total-variation distance 0.030' in card
