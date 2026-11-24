@@ -5,6 +5,8 @@ from torch.nn import functional as F
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.nanochat.modeling_nanochat import NanoChatForCausalLM, NanoChatPreTrainedModel
+from transformers.utils.deprecation import deprecate_kwarg
+from transformers.utils.generic import can_return_tuple
 from .configuration_rh_nanochat import RHNanoChatConfig
 
 
@@ -76,7 +78,15 @@ class Block(nn.Module):
 class RHNanoChatForCausalLM(NanoChatForCausalLM):
     config_class = RHNanoChatConfig
     _tied_weights_keys = {}
-    _supports_static_cache = False
+    supports_gradient_checkpointing = False
+    _supports_flash_attn = False
+    _supports_sdpa = False
+    _supports_flex_attn = False
+    _supports_attention_backend = False
+    _no_split_modules = ["Block"]
+    _tp_plan = {}
+    _pp_plan = {}
+    accepts_loss_kwargs = False
 
     def __init__(self, config):
         NanoChatPreTrainedModel.__init__(self, config)
@@ -102,11 +112,20 @@ class RHNanoChatForCausalLM(NanoChatForCausalLM):
 
     def _reorder_cache(self, cache, beam_idx):
         cache.reorder_cache(beam_idx)
-        if hasattr(cache, "rh_prev_embedding"):
-            cache.rh_prev_embedding = cache.rh_prev_embedding.index_select(0, beam_idx.to(cache.rh_prev_embedding.device))
+        if hasattr(cache, "rh_embedding_history"):
+            cache.rh_embedding_history = cache.rh_embedding_history.index_select(0, beam_idx.to(cache.rh_embedding_history.device))
         return cache
 
+    @can_return_tuple
+    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, cache=None, use_cache=None, labels=None, logits_to_keep=0, **kwargs):
+        if kwargs.get("output_hidden_states", self.config.output_hidden_states) or kwargs.get("output_attentions", self.config.output_attentions):
+            raise ValueError("output_hidden_states and output_attentions are not supported")
+        if attention_mask is not None and attention_mask.ndim != 2:
+            raise ValueError("Only a 2D attention mask is supported")
+        if cache is not None and cache.is_compileable:
+            raise ValueError("Static cache is not supported")
+        use_cache = self.config.use_cache if use_cache is None else use_cache
         if input_ids is None:
             raise ValueError("input_ids are required")
         if use_cache and cache is None:
@@ -116,9 +135,13 @@ class RHNanoChatForCausalLM(NanoChatForCausalLM):
         if position_ids is None:
             position_ids = torch.arange(start, start + t, device=input_ids.device).unsqueeze(0)
         x = norm(self.transformer.wte(input_ids))
-        prev = getattr(cache, "rh_prev_embedding", None) if cache is not None else None
+        history = getattr(cache, "rh_embedding_history", None) if cache is not None else None
+        if start and (history is None or history.size(1) < start):
+            raise ValueError("Cache is missing embedding history needed for smear")
+        prev = history[:, start-1:start] if start else None
         if cache is not None:
-            cache.rh_prev_embedding = x[:, -1:, :]
+            prefix = history[:, :start] if start else x[:, :0]
+            cache.rh_embedding_history = torch.cat((prefix, x), dim=1)
         previous = torch.cat((prev if prev is not None else torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
         if attention_mask is not None:
             valid = attention_mask[:, start:start + t].unsqueeze(-1).to(x.dtype)
@@ -143,8 +166,11 @@ class RHNanoChatForCausalLM(NanoChatForCausalLM):
         if backout is not None:
             x = x - self.backout_lambda.to(x.dtype) * backout
         x = norm(x)
-        if isinstance(logits_to_keep, int) and logits_to_keep > 0:
-            x = x[:, -logits_to_keep:]
+        if isinstance(logits_to_keep, int):
+            if logits_to_keep > 0:
+                x = x[:, -logits_to_keep:]
+        else:
+            x = x[:, logits_to_keep]
         logits = self.lm_head(x)[..., :self.config.vocab_size].float()
         logits = 15 * torch.tanh(logits / 15)
         loss = None if labels is None else F.cross_entropy(logits[:, :-1].reshape(-1, logits.size(-1)), labels[:, 1:].reshape(-1), ignore_index=-100)
