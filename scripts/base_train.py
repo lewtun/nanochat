@@ -58,6 +58,8 @@ parser.add_argument("--num-iterations", type=int, default=-1, help="explicit num
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
 parser.add_argument("--target-param-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
 # Optimization
+parser.add_argument("--tokenizer-sha256", default="", help="expected SHA-256 of tokenizer.pkl")
+parser.add_argument("--tokenizer-bucket-path", default="", help="bucket URI of tokenizer.pkl for checkpoint provenance")
 parser.add_argument("--track-data-exposure", action="store_true", help="count distinct text token positions seen; unsupported with resume")
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
@@ -121,6 +123,13 @@ else:
 
 # -----------------------------------------------------------------------------
 # Tokenizer will be useful for evaluation and also we need the vocab size to init the model
+if args.tokenizer_sha256:
+    import hashlib
+    tokenizer_path = os.path.join(os.environ.get("NANOCHAT_TOKENIZER_DIR", os.path.join(get_base_dir(), "tokenizer")), "tokenizer.pkl")
+    with open(tokenizer_path, "rb") as handle:
+        actual_tokenizer_sha256 = hashlib.file_digest(handle, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(handle.read()).hexdigest()
+    if actual_tokenizer_sha256 != args.tokenizer_sha256:
+        raise ValueError("tokenizer.pkl SHA-256 does not match the expected tokenizer")
 tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
@@ -510,6 +519,8 @@ while True:
                 "step": step,
                 "val_bpb": val_bpb, # loss at last step
                 "model_config": model_config_kwargs,
+                "tokenizer_sha256": args.tokenizer_sha256 or None,
+                "tokenizer_bucket_path": args.tokenizer_bucket_path or None,
                 "user_config": user_config, # inputs to the training script
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,

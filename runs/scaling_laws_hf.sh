@@ -35,7 +35,7 @@ NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
 read -r -a DEPTHS <<< "${DEPTHS:-10 12 14 16 18 20}"
 
-RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,head_dim,asset_prefix,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,total_batch_size,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
+RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,head_dim,asset_prefix,tokenizer_sha256,tokenizer_bucket_path,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,total_batch_size,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -283,13 +283,13 @@ assert bucket in text and mount in text, f"Expected {bucket} mounted at {mount}:
 
 parse_training_log() {
     local log_file="$1" flops_budget="$2" depth="$3" run_name="$4" train_time="$5"
-    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" "$ASSET_PREFIX" "$HEAD_DIM" <<'PY'
+    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" "$ASSET_PREFIX" "$HEAD_DIM" "${TOKENIZER_SHA256:-}" "${TOKENIZER_BUCKET_PATH:-}" <<'PY'
 import csv
 import math
 import re
 import sys
 
-log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text, asset_prefix, expected_head_dim = sys.argv[1:]
+log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text, asset_prefix, expected_head_dim, tokenizer_sha256, tokenizer_bucket_path = sys.argv[1:]
 text = open(log_path, encoding="utf-8", errors="replace").read()
 
 def last(pattern, label, flags=re.MULTILINE):
@@ -349,6 +349,8 @@ row = [
     width,
     width // heads,
     asset_prefix,
+    tokenizer_sha256,
+    tokenizer_bucket_path,
     *params,
     params[2] + params[3],
     num_iterations,
@@ -427,6 +429,8 @@ payload = {
     "head_dim": int(os.environ["HEAD_DIM"]),
     "min_steps": int(os.environ["MIN_STEPS"]),
     "data_manifest_git_sha": os.environ.get("DATA_MANIFEST_GIT_SHA", "unknown"),
+    "tokenizer_sha256": os.environ["TOKENIZER_SHA256"],
+    "tokenizer_bucket_path": os.environ["TOKENIZER_BUCKET_PATH"],
     "trackio_space_id": os.environ["TRACKIO_SPACE_ID"],
     "trackio_bucket": os.environ["TRACKIO_BUCKET"],
     "nproc_per_node": int(os.environ["NPROC_PER_NODE"]),
@@ -641,6 +645,8 @@ PYSTEPS
         --depth="$depth" \
         --head-dim="$HEAD_DIM" \
         --min-steps="$MIN_STEPS" \
+        --tokenizer-sha256="$TOKENIZER_SHA256" \
+        --tokenizer-bucket-path="$TOKENIZER_BUCKET_PATH" \
         "${horizon_args[@]}" \
         --run="$run_name" \
         --model-tag="$model_tag" \
@@ -705,6 +711,19 @@ PYDATA
     export DATA_MANIFEST_GIT_SHA TRAIN_CORPUS_TOKENS TOKENIZER_VOCAB_SIZE
     [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl" ]] || die "Missing tokenizer.pkl"
     [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/token_bytes.pt" ]] || die "Missing token_bytes.pt"
+    TOKENIZER_BUCKET_PATH="hf://buckets/${HF_BUCKET}/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl"
+    TOKENIZER_SHA256="$(run_python - "$data_manifest_path" "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl" <<'PYSHA'
+import hashlib, json, sys
+manifest = json.load(open(sys.argv[1]))
+with open(sys.argv[2], 'rb') as handle:
+    actual = hashlib.sha256(handle.read()).hexdigest()
+expected = manifest.get('tokenizer_sha256')
+if expected and actual != expected:
+    raise SystemExit('Tokenizer hash does not match data manifest')
+print(actual)
+PYSHA
+)"
+    export TOKENIZER_SHA256 TOKENIZER_BUCKET_PATH
 
     RESULTS_DIR="$NANOCHAT_MOUNT/scaling_laws/$RUN_LABEL"
     RESULTS_FILE="$RESULTS_DIR/results.csv"
@@ -719,6 +738,7 @@ PYDATA
     runtime_base="/workspace/nanochat-runtime-${JOB_ID:-local}"
     mkdir -p "$runtime_base/base_checkpoints"
     stage_training_assets "$runtime_base"
+    [[ "$(run_python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$runtime_base/tokenizer/tokenizer.pkl")" == "$TOKENIZER_SHA256" ]] || die "Staged tokenizer hash differs from bucket"
 
     for flops_budget in "${FLOPS_BUDGETS[@]}"; do
         for depth in "${DEPTHS[@]}"; do

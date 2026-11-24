@@ -6,6 +6,7 @@ NANOCHAT_BASE_DIR=.../runtime NANOCHAT_DATA_DIR=.../runtime/base_data_rh \
 Finally run this script with --count-tokens to add tokenizer counts to the manifest.
 """
 import argparse
+import hashlib
 from collections import defaultdict
 import json
 from pathlib import Path
@@ -110,6 +111,8 @@ def count(output):
             print(f'{split} {name}: {tokens:,} tokens', flush=True)
         manifest[split]['tokens'] = tokens
         manifest[split]['bytes_per_token'] = manifest[split]['bytes'] / tokens
+    manifest['tokenizer_sha256'] = hashlib.sha256((output / 'tokenizer' / 'tokenizer.pkl').read_bytes()).hexdigest()
+    manifest['tokenizer_relative_path'] = 'tokenizer/tokenizer.pkl'
     manifest['tokenizer_vocab_size'] = tokenizer.get_vocab_size()
     manifest['status'] = 'COMPLETE'
     path.write_text(json.dumps(manifest, indent=2) + '\n')
