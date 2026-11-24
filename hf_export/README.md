@@ -1,4 +1,4 @@
-# Exporting checkpoints
+# Exporting riemann-nano checkpoints
 
 Install the fork's CPU dependencies and the exporter dependencies in a Python environment:
 
@@ -11,4 +11,4 @@ The default step is the latest checkpoint in the directory. Load the resulting f
 
 The fast tokenizer recognizes literal special-token strings as special tokens. Nanochat's ordinary text encoder instead treats those strings as ordinary text; compare special tokens using `encode_special`, and ordinary text that does not contain literal special tokens using `encode`.
 
-After the operator approves a repository name and a private repository exists, upload with `python -m hf_export.upload OUTPUT_DIR OWNER/REPO`. The uploader refuses public repositories and does not create a repository.
+The approved smoke-test repository is `lewtun/riemann-nano-smoke`. When a real checkpoint is available, create the repository as private and immediately add it to the private `lewtun/riemann-nano-6b059a7cb0adb6e1ef7acba2` collection with a one-line note. Then upload with `python -m hf_export.upload OUTPUT_DIR lewtun/riemann-nano-smoke`. The uploader refuses public repositories and does not create a repository. The final model is `lewtun/riemann-nano`; other sweep exports belong in `lewtun/riemann-nano-sweep`, one subfolder per run using `--path-in-repo RUN_NAME`.

@@ -53,7 +53,7 @@ def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None):
     model.save_pretrained(output_dir, safe_serialization=True)
     for name in ('configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'):
         (output_dir / name).write_text((Path(__file__).parent / name).read_text())
-    (output_dir / 'README.md').write_text('''---\nlibrary_name: transformers\n---\n# RH nanochat model\n\nThis model was trained on the Lean 4 formalization of the Riemann Hypothesis proof by Alpöge (https://alpo.ge/). Complete this card with the exact data split, training run, license, evaluation and limitations before sharing.\n\nThe model is part of a data-constrained scaling-law study, informed by Muennighoff et al., [Scaling Data-Constrained Language Models](https://arxiv.org/abs/2305.16264).\n\nRequires transformers 5.24 and `trust_remote_code=True`.\n''')
+    (output_dir / 'README.md').write_text('''---\nlibrary_name: transformers\n---\n# riemann-nano\n\nThis model was trained on the Lean 4 formalization of the Riemann Hypothesis proof by Alpöge (https://alpo.ge/). Complete this card with the exact data split, training run, license, evaluation and limitations before sharing.\n\nThe model is part of a data-constrained scaling-law study, informed by Muennighoff et al., [Scaling Data-Constrained Language Models](https://arxiv.org/abs/2305.16264).\n\nRequires transformers 5.24 and `trust_remote_code=True`.\n''')
 
 
 if __name__ == '__main__':
