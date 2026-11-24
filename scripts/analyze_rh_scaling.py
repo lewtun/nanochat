@@ -24,6 +24,7 @@ parser.add_argument('--area-dir', type=Path, help='directory of per-checkpoint a
 parser.add_argument('--asset-prefix', default='rh', help='only analyze runs using this dataset and tokenizer version')
 parser.add_argument('--head-dim', type=int, default=64)
 parser.add_argument('--noise-sigma', type=float, default=0, help='independently measured BPB noise floor (pooled with residual estimate conservatively)')
+parser.add_argument('--diagnostics', type=Path, help='JSON with controlled seed and optimizer comparisons for the model card')
 args = parser.parse_args()
 if not np.isfinite(args.noise_sigma) or args.noise_sigma < 0:
     parser.error('--noise-sigma must be finite and nonnegative')
@@ -271,6 +272,11 @@ card=['## Scaling-law results','','We trained on the Lean corpus with held-out s
 if manifest.get('train') and manifest.get('validation'):
     train, val = manifest['train'], manifest['validation']
     card += [f"The training split contains {train['files']:,} documents and {train['tokens']:,} text tokens. Matched validation contains {val['files']:,} documents. The train–validation area distribution has total-variation distance {manifest['train_validation_area_tv']:.3f}.", '']
+if args.diagnostics:
+    diagnostics = json.loads(args.diagnostics.read_text())
+    seed = diagnostics['seed_comparison']
+    decay = diagnostics['weight_decay_comparison']
+    card += [f"A second initialization seed at {seed['budget']:.3g} FLOPs across {len(seed['depths'])} depths gave a provisional {seed['noise_sigma_bpb']:.4f} BPB single-run noise estimate; data order was unchanged. Reducing the reference weight decay from {decay['baseline_reference_decay']:.2f} to {decay['comparison_reference_decay']:.2f} worsened those depths by {min(decay['bpb_differences']):.3f}–{max(decay['bpb_differences']):.3f} BPB. The fitted scaling behavior is conditional on the optimizer schedule.", '']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
 else: card += ['Directory difficulty plot pending per-checkpoint evaluation.','']
 for regime in ('fresh','repeated'):
