@@ -244,3 +244,7 @@ If you find nanochat helpful in your research cite simply as:
 ## License
 
 MIT
+
+The Transformers export and its tests require Python 3.11 or newer. See
+[`hf_export/README.md`](hf_export/README.md) for setup and usage; for example,
+`uv run --python 3.11 --group dev python -m pytest tests/test_hf_export.py`.
