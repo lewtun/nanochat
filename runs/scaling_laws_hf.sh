@@ -123,7 +123,7 @@ run_python() {
 }
 
 parse_job_id() {
-    awk '$1 == "id:" && NF == 2 { print $2; found = 1; exit } END { if (!found) exit 1 }'
+    awk '$1 == "id:" && NF == 2 { print $2; found = 1; exit } $1 ~ /^id=/ { sub(/^id=/, "", $1); print $1; found = 1; exit } END { if (!found) exit 1 }'
 }
 
 validate_settings() {
