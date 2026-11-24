@@ -2,6 +2,7 @@
 import argparse
 import json
 import pickle
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -31,7 +32,9 @@ def convert_tokenizer(tokenizer_dir, output_dir):
     return enc.n_vocab
 
 
-def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None):
+def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None, results_markdown=None, assets_dir=None):
+    if (results_markdown is None) != (assets_dir is None):
+        raise ValueError("Provide both results_markdown and assets_dir, or neither")
     checkpoint_dir, output_dir = Path(checkpoint_dir), Path(output_dir)
     if step is None:
         step = max(int(p.stem.split('_')[-1]) for p in checkpoint_dir.glob('model_*.pt'))
@@ -53,7 +56,17 @@ def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None):
     model.save_pretrained(output_dir, safe_serialization=True)
     for name in ('configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'):
         (output_dir / name).write_text((Path(__file__).parent / name).read_text())
-    (output_dir / 'README.md').write_text('''---\nlibrary_name: transformers\n---\n# riemann-nano\n\nThis model was trained on the Lean 4 formalization of the Riemann Hypothesis proof by Alpöge (https://alpo.ge/). Complete this card with the exact data split, training run, license, evaluation and limitations before sharing.\n\nThe model is part of a data-constrained scaling-law study, informed by Muennighoff et al., [Scaling Data-Constrained Language Models](https://arxiv.org/abs/2305.16264).\n\nRequires transformers 5.24 and `trust_remote_code=True`.\n''')
+    card = '''---\nlibrary_name: transformers\n---\n# riemann-nano\n\nThis model was trained on the Lean 4 formalization of the Riemann Hypothesis proof by Alpöge (https://alpo.ge/). Complete this card with the exact data split, training run, license, evaluation and limitations before sharing.\n\nThe model is part of a data-constrained scaling-law study, informed by Muennighoff et al., [Scaling Data-Constrained Language Models](https://arxiv.org/abs/2305.16264).\n\nRequires transformers 5.24 and `trust_remote_code=True`.\n'''
+    if results_markdown is not None:
+        card += '\n' + Path(results_markdown).read_text(encoding='utf-8').strip() + '\n'
+        shutil.copytree(assets_dir, output_dir / 'assets', dirs_exist_ok=True)
+    else:
+        card += ('\n## Scaling-law results\n\n'
+                 'Add the sweep results and plots before publishing the final model: '
+                 'isoFLOP curves, best loss against compute, optimal N and D with fitted exponents, '
+                 'tokens:params against compute, the per-directory difficulty map, and the '
+                 'optimal-configurations table. Embed plots using relative `assets/` links.\n')
+    (output_dir / 'README.md').write_text(card, encoding='utf-8')
 
 
 if __name__ == '__main__':
@@ -62,5 +75,7 @@ if __name__ == '__main__':
     p.add_argument('tokenizer_dir')
     p.add_argument('output_dir')
     p.add_argument('--step', type=int)
+    p.add_argument('--results-markdown', help='Sweep results section containing relative assets/ links')
+    p.add_argument('--assets-dir', help='Directory of plot assets to copy into assets/')
     args = p.parse_args()
-    convert(args.checkpoint_dir, args.tokenizer_dir, args.output_dir, args.step)
+    convert(args.checkpoint_dir, args.tokenizer_dir, args.output_dir, args.step, args.results_markdown, args.assets_dir)

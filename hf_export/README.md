@@ -9,6 +9,16 @@ python -m hf_export.convert CHECKPOINT_DIR TOKENIZER_DIR OUTPUT_DIR [--step STEP
 
 The default step is the latest checkpoint in the directory. Load the resulting folder with `AutoModelForCausalLM.from_pretrained(OUTPUT_DIR, trust_remote_code=True)` and `AutoTokenizer.from_pretrained(OUTPUT_DIR)`. Checkpoint and tokenizer pickle files must come from a trusted source. The exporter checks that their vocabulary sizes match and that every model weight loads. Complete the generated model card with the actual training run and license before sharing.
 
+For the final model, supply the sweep executor's results section and plot directory during conversion:
+
+```sh
+python -m hf_export.convert CHECKPOINT_DIR TOKENIZER_DIR OUTPUT_DIR \
+  --results-markdown RESULTS_SECTION.md \
+  --assets-dir /data/workspaces/nanochat-rh/results/plots
+```
+
+The results Markdown is appended to the card and the plot directory is copied into `OUTPUT_DIR/assets/`. Its image links must use relative paths such as `assets/isoflop.png`. The uploader sends the entire converted folder, including the card and assets. Check that the final card includes all requested plots, fitted exponents, and the optimal-configurations table before uploading. Without these options, conversion writes a reminder in the template for the final model.
+
 The fast tokenizer recognizes literal special-token strings as special tokens. Nanochat's ordinary text encoder instead treats those strings as ordinary text; compare special tokens using `encode_special`, and ordinary text that does not contain literal special tokens using `encode`.
 
 The approved smoke-test repository is `lewtun/riemann-nano-smoke`. When a real checkpoint is available, create the repository as private and immediately add it to the private `lewtun/riemann-nano-6b059a7cb0adb6e1ef7acba2` collection with a one-line note. Then upload with `python -m hf_export.upload OUTPUT_DIR lewtun/riemann-nano-smoke`. The uploader refuses public repositories and does not create a repository. The final model is `lewtun/riemann-nano`; other sweep exports belong in `lewtun/riemann-nano-sweep`, one subfolder per run using `--path-in-repo RUN_NAME`.

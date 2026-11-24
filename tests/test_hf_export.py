@@ -64,7 +64,14 @@ def test_convert_roundtrip(tmp_path):
     orig, _ = models(2)
     torch.save(orig.state_dict(), ckpt / 'model_000001.pt')
     (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(orig.config)}))
-    convert(ckpt, tokdir, out)
+    plots = tmp_path / 'plots'
+    plots.mkdir()
+    (plots / 'isoflop.png').write_bytes(b'example plot')
+    results = tmp_path / 'results.md'
+    results.write_text('## Scaling-law results\n\n![isoFLOP](assets/isoflop.png)\n\n| N | D |\n|---|---|\n| 1 | 2 |\n')
+    convert(ckpt, tokdir, out, results_markdown=results, assets_dir=plots)
+    assert '![isoFLOP](assets/isoflop.png)' in (out / 'README.md').read_text()
+    assert (out / 'assets/isoflop.png').read_bytes() == b'example plot'
     assert all((out / name).exists() for name in ("model.safetensors", "config.json", "generation_config.json", "tokenizer.json", "README.md"))
     model = AutoModelForCausalLM.from_pretrained(out, trust_remote_code=True)
     fast = AutoTokenizer.from_pretrained(out)
