@@ -254,6 +254,9 @@ if manifest.get("dataset") == "alpo.ge/lean":
     assert len(files) > 1 and len(files) == len(set(files))
     assert files == sorted(files) and manifest["validation_shard"] == files[-1]
     assert manifest["train"]["tokens"] > 0
+    assert manifest.get("unseen_shard") and manifest.get("area_split_bytes")
+    assert manifest.get("train_validation_area_tv", 1) < 0.1
+    assert all(not values["validation_bytes"] or values["train_bytes"] for values in manifest["area_split_bytes"].values())
     print(manifest.get("git_sha", "rh-preparation"))
     raise SystemExit
 for key, value in expected.items():

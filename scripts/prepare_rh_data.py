@@ -63,19 +63,52 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
         area_bytes[area(relative)] += size
         if f.parent in leaves:
             eligible[area(relative)][f.parent] += size
-    # The minimum feasible coverage minimizes the deviation from the 3% target.
-    held = {min(dirsizes, key=lambda d: (dirsizes[d], str(d))) for dirsizes in eligible.values()}
+    # An entire single-leaf area is kept as a transfer-only evaluation set.
+    unseen_areas = {name for name, sizes in eligible.items()
+                    if len(sizes) == 1 and sum(sizes.values()) == area_bytes[name]}
+    unseen = [f for f in files if area(f.relative_to(source)) in unseen_areas]
+    rng = random.Random(seed)
+    held = set()
+    matched_unrepresented = []
+    for name in sorted(set(eligible) - unseen_areas):
+        entries = sorted(eligible[name].items(), key=lambda item: str(item[0]))
+        target = 0.03 * area_bytes[name]
+        best, error = [], target
+        # Randomize whole-leaf proposals, keeping the closest 3% subset.
+        # Empty is allowed where every eligible leaf is grossly oversized.
+        for _ in range(200):
+            rng.shuffle(entries)
+            selected, size = [], 0
+            for directory, n in entries:
+                if size + n < area_bytes[name] and abs(size + n - target) < abs(size - target):
+                    selected.append(directory)
+                    size += n
+            if abs(size - target) < error:
+                best, error = selected[:], abs(size - target)
+        held.update(best)
+        if not best:
+            matched_unrepresented.append(name)
+    difficulty_dirs = set()
+    for name in matched_unrepresented:
+        options = [(size, str(directory), directory) for directory, size in eligible[name].items() if size < area_bytes[name]]
+        if not options:
+            raise ValueError(f'No held-out leaf can leave training data in {name}')
+        difficulty_dirs.add(min(options)[2])
     fallback_areas = sorted(set(area_bytes) - set(eligible))
     file_holdouts = {}
-    rng = random.Random(seed)
     for name in fallback_areas:
         candidates = [f for f in files if area(f.relative_to(source)) == name]
-        count = max(1, round(len(candidates) * 0.03))
+        count = min(len(candidates) - 1, max(1, round(len(candidates) * 0.03)))
+        if count <= 0:
+            raise ValueError(f'Cannot leave both train and validation files in {name}')
         file_holdouts[name] = sorted(rng.sample(candidates, count))
     held_files = {f for selected in file_holdouts.values() for f in selected}
-    train = [f for f in files if f.parent not in held and f not in held_files]
-    val = [f for f in files if f.parent in held or f in held_files]
-    validation_hashes = {hashlib.sha256(f.read_bytes()).digest() for f in val}
+    unseen_set = set(unseen)
+    difficulty = [f for f in files if f not in unseen_set and f.parent in difficulty_dirs]
+    difficulty_set = set(difficulty)
+    val = [f for f in files if f not in unseen_set and (f.parent in held or f in held_files)]
+    train = [f for f in files if f not in unseen_set and f not in difficulty_set and f.parent not in held and f not in held_files]
+    validation_hashes = {hashlib.sha256(f.read_bytes()).digest() for f in val + unseen + difficulty}
     duplicates = [f for f in train if hashlib.sha256(f.read_bytes()).digest() in validation_hashes]
     duplicate_set = set(duplicates)
     train = [f for f in train if f not in duplicate_set]
@@ -92,6 +125,12 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
     name = 'shard_99999.parquet'
     write(data / name, val)
     names.append(name)
+    unseen_data = output / 'unseen_data'
+    unseen_data.mkdir(parents=True, exist_ok=True)
+    write(unseen_data / 'unseen.parquet', unseen)
+    difficulty_data = output / 'difficulty_data'
+    difficulty_data.mkdir(parents=True, exist_ok=True)
+    write(difficulty_data / 'difficulty.parquet', difficulty)
     def stats(items):
         return {'files': len(items), 'bytes': sum(f.stat().st_size for f in items)}
     git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parent, text=True).strip()
@@ -99,6 +138,14 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
     if source_tarball:
         with source_tarball.open('rb') as handle:
             source_sha = hashlib.file_digest(handle, 'sha256').hexdigest()
+    per_area = {name: {'train_bytes': 0, 'validation_bytes': 0, 'unseen_bytes': 0, 'difficulty_bytes': 0} for name in area_bytes}
+    for group, items in [('train', train), ('validation', val), ('unseen', unseen), ('difficulty', difficulty)]:
+        for f in items:
+            per_area[area(f.relative_to(source))][group + '_bytes'] += f.stat().st_size
+    train_bytes, val_bytes = stats(train)['bytes'], stats(val)['bytes']
+    if not train_bytes or not val_bytes:
+        raise ValueError('Matched split requires nonempty training and validation data')
+    tv = 0.5 * sum(abs(v['train_bytes']/train_bytes - v['validation_bytes']/val_bytes) for v in per_area.values())
     manifest = {'schema_version': 1, 'status': 'PREPARED', 'dataset': 'alpo.ge/lean',
                 'git_sha': git_sha, 'source_tarball_sha256': source_sha,
                 'excluded_duplicate_train_files': [str(f.relative_to(source)) for f in duplicates],
@@ -106,9 +153,19 @@ def prepare(source, output, seed, shard_size, source_tarball=None):
                 'num_train_shards': len(names)-1, 'validation_shard': name,
                 'held_out_directories': sorted(str(d.relative_to(source)) for d in held),
                 'validation_files': [str(f.relative_to(source)) for f in val],
+                'unseen_files': [str(f.relative_to(source)) for f in unseen],
+                'unseen_shard': 'unseen.parquet', 'unseen_data_prefix': 'unseen_data',
+                'difficulty_shard': 'difficulty.parquet', 'difficulty_data_prefix': 'difficulty_data',
+                'difficulty_files': [str(f.relative_to(source)) for f in difficulty],
+                'difficulty_held_out_directories': sorted(str(d.relative_to(source)) for d in difficulty_dirs),
+                'unseen_areas': sorted(unseen_areas),
+                'matched_unrepresented_areas': matched_unrepresented,
+                'area_split_bytes': dict(sorted(per_area.items())),
+                'area_evaluation_set': {name: ('unseen' if name in unseen_areas else 'difficulty_only' if name in matched_unrepresented else 'matched') for name in sorted(area_bytes)},
+                'train_validation_area_tv': tv,
                 'file_level_areas': {name: [str(f.relative_to(source)) for f in selected] for name, selected in file_holdouts.items()},
                 'uncovered_areas': [],
-                'train': stats(train), 'validation': stats(val),
+                'train': stats(train), 'validation': stats(val), 'unseen': stats(unseen), 'difficulty': stats(difficulty),
                 'area_bytes': dict(sorted(area_bytes.items()))}
     atomic_manifest(output / 'data_manifest.json', manifest)
     print(json.dumps({k: manifest[k] for k in ('train', 'validation', 'uncovered_areas')}, indent=2))
@@ -129,10 +186,11 @@ def count(output, bucket):
     tokenizer = RustBPETokenizer.from_directory(output / 'tokenizer')
     path = output / 'data_manifest.json'
     manifest = json.loads(path.read_text())
-    for split, names in [('train', manifest['parquet_files'][:-1]), ('validation', manifest['parquet_files'][-1:])]:
+    for split, names in [('train', manifest['parquet_files'][:-1]), ('validation', manifest['parquet_files'][-1:]), ('unseen', [manifest['unseen_shard']]), ('difficulty', [manifest['difficulty_shard']])]:
         tokens = 0
         for name in names:
-            parquet = pq.ParquetFile(output / manifest['data_prefix'] / name)
+            directory = manifest[split + '_data_prefix'] if split in ('unseen', 'difficulty') else manifest['data_prefix']
+            parquet = pq.ParquetFile(output / directory / name)
             for batch in parquet.iter_batches(batch_size=256, columns=['text']):
                 tokens += sum(len(ids) for ids in tokenizer.encode(batch.column(0).to_pylist()))
             print(f'{split} {name}: {tokens:,} tokens', flush=True)
@@ -149,6 +207,8 @@ def count(output, bucket):
     manifest['tokenizer_relative_path'] = 'tokenizer/tokenizer.pkl'
     manifest['tokenizer_bucket_path'] = f'hf://buckets/{bucket}/rh/tokenizer/tokenizer.pkl'
     manifest['data_bucket_path'] = f'hf://buckets/{bucket}/rh/base_data'
+    manifest['unseen_bucket_path'] = f'hf://buckets/{bucket}/rh/unseen_data'
+    manifest['difficulty_bucket_path'] = f'hf://buckets/{bucket}/rh/difficulty_data'
     manifest['tokenizer_vocab_size'] = tokenizer.get_vocab_size()
     manifest['status'] = 'COMPLETE'
     atomic_manifest(path, manifest)

@@ -208,10 +208,10 @@ if args.area_dir:
     if any(set(p.get('file_level_areas', {})) != expected_areas or p.get('tokenizer_sha256') != expected_sha for p in payloads):
         raise ValueError('Area results do not match the canonical tokenizer and split')
     if payloads:
-        areas=sorted({name for p in payloads for name in p['areas']})
+        areas=sorted(manifest['area_split_bytes'])
         matrix=np.array([[p['areas'].get(a,{}).get('bits_per_byte',np.nan) for p in payloads] for a in areas],dtype=float)
         fig,ax=plt.subplots(figsize=(max(7,len(payloads)*.45),max(5,min(60,len(areas)*.18))))
-        im=ax.imshow(matrix,aspect='auto',interpolation='nearest'); ax.set_yticks(range(len(areas)),[a + (' *' if any(a in p.get('file_level_areas', {}) for p in payloads) else '') for a in areas],fontsize=4); ax.set_xticks(range(len(payloads)),[p['checkpoint'] for p in payloads],rotation=90,fontsize=6); ax.set(title='Held-out difficulty by source area (* file-level split)',xlabel='Checkpoint'); fig.colorbar(im,ax=ax,label='Bits per byte'); fig.savefig(plot_dir/'directory_difficulty.png'); plt.close(fig); area_plot=True
+        im=ax.imshow(matrix,aspect='auto',interpolation='nearest'); ax.set_yticks(range(len(areas)),[a + (' [' + manifest['area_evaluation_set'][a] + ']') + (' *' if a in expected_areas else '') for a in areas],fontsize=4); ax.set_xticks(range(len(payloads)),[p['checkpoint'] for p in payloads],rotation=90,fontsize=6); ax.set(title='Held-out difficulty (unseen = transfer; * file-level split)',xlabel='Checkpoint'); fig.colorbar(im,ax=ax,label='Bits per byte'); fig.savefig(plot_dir/'directory_difficulty.png'); plt.close(fig); area_plot=True
 card=['## Scaling-law results','','We trained on the Lean corpus with held-out source directories. The figures report validation bits per byte, training compute and effective parameters (transformer matrices plus the language-model head).','',
       '![IsoFLOP curves](assets/isoflop.png)','','![Best loss against compute](assets/best_loss.png)','','![Optimal model size and training tokens](assets/optimal_nd.png)','','![Optimal tokens per parameter](assets/tokens_per_param.png)','']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
@@ -227,5 +227,5 @@ for regime in ('fresh','repeated'):
 card += ['| FLOPs | Effective parameters (95% CI) | Training tokens | Tokens/parameter | Fitted BPB | Best measured BPB | Passes |','| ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
 for r in optimal:
     card.append(f"| {r['flops']:.3g} | {r['effective_params']:,.0f} ({r['params_ci_low']:,.0f}–{r['params_ci_high']:,.0f}) | {r['tokens']:,.0f} | {r['ratio']:.2f} | {r['val_bpb']:.4f} | {r['best_measured_bpb']:.4f} | {r['passes']:.2f} |")
-card += ['', 'Token-equivalent passes divide text-token exposures by the training split text-token count. Reuse factors and measured unique token positions are recorded in the results data. Three areas use file-level validation splits; other areas use directory-level splits.','']
+card += ['', 'Token-equivalent passes divide text-token exposures by the training split text-token count. Reuse factors and measured unique token positions are recorded in the results data. Three areas use file-level validation splits. Matched validation measures held-out leaves from training areas; difficulty-only leaves and unseen areas are excluded from scaling fits, and unseen areas measure transfer.','']
 (args.output_dir/'model_card_results.md').write_text('\n'.join(card))
