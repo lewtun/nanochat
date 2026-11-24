@@ -21,6 +21,7 @@ parser.add_argument('--data-dir', type=Path, required=True)
 parser.add_argument('--checkpoints', type=Path, nargs='+', required=True)
 parser.add_argument('--output-dir', type=Path, required=True)
 parser.add_argument('--device', default='cuda')
+parser.add_argument('--force', action='store_true', help='replace existing area results')
 args = parser.parse_args()
 manifest = json.loads(args.manifest.read_text())
 paths = manifest['validation_files']
@@ -29,6 +30,11 @@ if parquet.metadata.num_rows != len(paths):
     raise ValueError('Validation shard and manifest document counts differ')
 args.output_dir.mkdir(parents=True, exist_ok=True)
 for checkpoint in args.checkpoints:
+    destination = args.output_dir / f'{checkpoint.name}.json'
+    if destination.exists() and not args.force:
+        print(f'Skipping existing {destination}', flush=True)
+        continue
+    print(f'Evaluating {checkpoint}', flush=True)
     step = find_last_step(str(checkpoint))
     device = torch.device(args.device)
     model, tokenizer, meta = build_model(str(checkpoint), step, device, 'eval')
@@ -59,4 +65,6 @@ for checkpoint in args.checkpoints:
     payload = {'checkpoint': checkpoint.name, 'step': step, 'sequence_length': seq_len,
                'method': 'document BOS, nonoverlapping context windows',
                'uncovered_areas': manifest['uncovered_areas'], 'areas': dict(sorted(stats.items()))}
-    (args.output_dir / f'{checkpoint.name}.json').write_text(json.dumps(payload, indent=2) + '\n')
+    temporary = destination.with_suffix('.json.tmp')
+    temporary.write_text(json.dumps(payload, indent=2) + '\n')
+    temporary.replace(destination)
