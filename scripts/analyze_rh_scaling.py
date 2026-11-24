@@ -123,6 +123,10 @@ area_plot=False
 if args.area_dir:
     area_files=sorted(args.area_dir.glob('*.json'))
     payloads=[json.loads(p.read_text()) for p in area_files]
+    if args.asset_prefix == 'rh_v2':
+        expected = {'(root)', 'Formalism', 'Development/ResolutionOfSingularities'}
+        if any(set(p.get('file_level_areas', {})) != expected for p in payloads):
+            raise ValueError('Area results do not match the revised split; do not mix old and revised evaluations')
     if payloads:
         areas=sorted({name for p in payloads for name in p['areas']})
         matrix=np.array([[p['areas'].get(a,{}).get('bits_per_byte',np.nan) for p in payloads] for a in areas],dtype=float)
