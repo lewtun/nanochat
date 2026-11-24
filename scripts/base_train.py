@@ -365,6 +365,8 @@ elif args.target_param_data_ratio > 0:
     print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
 else:
     raise ValueError("No training horizon specified")
+if num_iterations <= 0:
+    raise ValueError("The training budget is too small for one optimizer step at this batch size")
 total_tokens = total_batch_size * num_iterations # the actual number of tokens we will train for
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
@@ -372,8 +374,9 @@ print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
-    warmup_iters = args.warmup_steps
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
+    # Finish warmup before warmdown even for very short FLOP budgets.
+    warmup_iters = min(args.warmup_steps, max(1, num_iterations - warmdown_iters))
     if it < warmup_iters:
         return (it + 1) / warmup_iters
     elif it <= num_iterations - warmdown_iters:
@@ -386,8 +389,9 @@ def get_lr_multiplier(it):
 def get_muon_momentum(it):
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     warmdown_start = num_iterations - warmdown_iters
-    if it < 400:
-        frac = it / 400
+    momentum_warmup = min(400, max(1, warmdown_start))
+    if it < momentum_warmup:
+        frac = it / momentum_warmup
         return (1 - frac) * 0.85 + frac * 0.97
     elif it >= warmdown_start:
         progress = (it - warmdown_start) / warmdown_iters
