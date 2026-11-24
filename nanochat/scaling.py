@@ -2,8 +2,17 @@
 import math
 
 
+def scaling_token_horizon(scaling_params, scaling_ratio, flops, flops_per_token, use_flop_horizon):
+    """Use the actual FLOP horizon whenever it determines the training run."""
+    if use_flop_horizon:
+        if flops <= 0 or flops_per_token <= 0:
+            raise ValueError("A positive FLOP horizon is required")
+        return flops / flops_per_token
+    return int(scaling_ratio * scaling_params)
+
+
 def cap_batch_for_steps(batch, flops, flops_per_token, min_steps, minimum_batch):
-    """Reduce an automatic batch to a power of two supporting min_steps.
+    """Reduce an automatic batch to a sequence-aligned size supporting min_steps.
 
     A full sequence on every rank is mandatory; raise if this hardware and
     sequence length cannot reach the requested step count at the given budget.
@@ -13,10 +22,8 @@ def cap_batch_for_steps(batch, flops, flops_per_token, min_steps, minimum_batch)
     maximum = flops / flops_per_token / min_steps
     if maximum < minimum_batch:
         raise ValueError(f"Cannot reach {min_steps} steps: the budget permits at most {maximum:.0f} tokens per step, below the distributed minimum {minimum_batch}")
-    cap = 2 ** math.floor(math.log2(maximum))
-    if cap < minimum_batch:
-        raise ValueError(f"Cannot select a power-of-two batch at or above {minimum_batch} within the budget")
-    return min(batch, cap)
+    cap = math.floor(maximum / minimum_batch) * minimum_batch
+    return min(max(minimum_batch, math.floor(batch / minimum_batch) * minimum_batch), cap)
 
 
 def fit_local_isoflop(params, losses):

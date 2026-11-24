@@ -27,11 +27,12 @@ import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.scaling import cap_batch_for_steps
+from nanochat.scaling import cap_batch_for_steps, scaling_token_horizon
 from nanochat.common import compute_init, compute_cleanup, print0, DummyTracker, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
-from nanochat.loss_eval import evaluate_bpb
+from nanochat.loss_eval import evaluate_bpb, full_document_validation_batches
+from nanochat.dataset import list_parquet_files
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
@@ -84,6 +85,10 @@ parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
+if args.min_steps < 0:
+    parser.error("--min-steps must be non-negative")
+if args.min_steps and (args.total_batch_size != -1 or args.target_flops <= 0 or args.num_iterations > 0):
+    parser.error("--min-steps requires automatic batch size, --target-flops, and no --num-iterations override")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and experiment tracking
@@ -280,7 +285,9 @@ def get_scaling_params(m):
     return scaling_params
 num_scaling_params = get_scaling_params(model)
 scaling_ratio = args.target_param_data_ratio if args.target_param_data_ratio > 0 else 12.0
-target_tokens = int(scaling_ratio * num_scaling_params) # optimal tokens for the model we are about to train
+target_tokens = scaling_token_horizon(num_scaling_params, scaling_ratio, args.target_flops,
+                                      num_flops_per_token, args.target_flops > 0 and args.num_iterations <= 0)
+print0(f"Scaling horizon tokens: {target_tokens:.12g}")
 
 # Our reference model is d12, this is where a lot of hyperparameters are tuned and then transfered to higher depths (muP style)
 d12_ref = build_model_meta(12) # creates the model on meta device
@@ -294,7 +301,11 @@ total_batch_size = args.total_batch_size # user-provided override is possible
 if total_batch_size == -1:
     batch_size_ratio = target_tokens / D_REF
     predicted_batch_size = B_REF * batch_size_ratio ** 0.383
-    total_batch_size = 2 ** round(math.log2(predicted_batch_size)) # clamp to nearest power of 2 for efficiency
+    minimum_batch = args.max_seq_len * ddp_world_size
+    if args.min_steps > 0:
+        total_batch_size = max(minimum_batch, round(predicted_batch_size / minimum_batch) * minimum_batch)
+    else:
+        total_batch_size = 2 ** round(math.log2(predicted_batch_size)) # historical default
     if args.min_steps > 0 and args.target_flops > 0:
         total_batch_size = cap_batch_for_steps(total_batch_size, args.target_flops,
                                                num_flops_per_token, args.min_steps,
@@ -332,6 +343,7 @@ if batch_ratio != 1.0:
 # λ = λ_ref · √(B/B_ref) · (D_ref/D)
 # Note that these papers study AdamW, *not* Muon. We are blindly following AdamW theory for scaling hoping it ~works for Muon too.
 weight_decay_scaled = args.weight_decay * math.sqrt(total_batch_size / B_REF) * (D_REF / target_tokens)
+print0(f"Scaling optimizer: batch_lr_scale={batch_lr_scale:.12g} weight_decay={weight_decay_scaled:.12g}")
 if weight_decay_scaled != args.weight_decay:
     print0(f"Scaling weight decay from {args.weight_decay:.6f} to {weight_decay_scaled:.6f} for depth {args.depth}")
 
@@ -396,7 +408,7 @@ print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 def get_lr_multiplier(it):
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     # Finish warmup before warmdown even for very short FLOP budgets.
-    warmup_iters = min(args.warmup_steps, max(1, num_iterations - warmdown_iters))
+    warmup_iters = min(args.warmup_steps, max(1, num_iterations - warmdown_iters)) if args.min_steps > 0 else args.warmup_steps
     if it < warmup_iters:
         return (it + 1) / warmup_iters
     elif it <= num_iterations - warmdown_iters:
@@ -409,7 +421,7 @@ def get_lr_multiplier(it):
 def get_muon_momentum(it):
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     warmdown_start = num_iterations - warmdown_iters
-    momentum_warmup = min(400, max(1, warmdown_start))
+    momentum_warmup = min(400, max(1, warmdown_start)) if args.min_steps > 0 else 400
     if it < momentum_warmup:
         frac = it / momentum_warmup
         return (1 - frac) * 0.85 + frac * 0.97
@@ -458,10 +470,17 @@ while True:
     # once in a while: evaluate the val bpb (all ranks participate)
     if args.eval_every > 0 and (last_step or step % args.eval_every == 0):
         model.eval()
-        val_loader = build_val_loader()
-        eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        if args.document_eos:
+            val_loader = full_document_validation_batches(tokenizer, list_parquet_files()[-1], args.device_batch_size,
+                                                            args.max_seq_len, ddp_rank, ddp_world_size, device)
+            # Original model permits variable padded lengths without recompilation.
+            with disable_fp8(orig_model):
+                val_bpb = evaluate_bpb(orig_model, val_loader, None, token_bytes)
+        else:
+            val_loader = build_val_loader()
+            eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+            with disable_fp8(model):
+                val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -528,6 +547,9 @@ while True:
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,
                 "total_batch_size": total_batch_size,
+                "scaling_horizon_tokens": target_tokens,
+                "batch_lr_scale": batch_lr_scale,
+                "weight_decay_scaled": weight_decay_scaled,
                 "dataloader_state_dict": dataloader_state_dict,
                 "loop_state": { # all loop state (other than step) so that we can resume training
                     "min_val_bpb": min_val_bpb,

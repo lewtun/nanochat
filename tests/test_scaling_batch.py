@@ -1,9 +1,9 @@
 import pytest
-from nanochat.scaling import cap_batch_for_steps
+from nanochat.scaling import cap_batch_for_steps, scaling_token_horizon
 
 
 def test_batch_cap_meets_horizon_and_preserves_smaller_batch():
-    assert cap_batch_for_steps(524288, 1e15, 1e8, 500, 2048) == 16384
+    assert cap_batch_for_steps(524288, 1e15, 1e8, 500, 2048) == 18432
     assert cap_batch_for_steps(8192, 1e15, 1e8, 500, 2048) == 8192
 
 
@@ -24,3 +24,20 @@ def test_local_fit_ignores_distant_points_and_rejects_edges():
     assert list(window) == [1, 2, 3, 4, 5]
     with pytest.raises(ValueError, match='two tested depths'):
         fit_local_isoflop(10 ** x, x)
+
+
+@pytest.mark.parametrize("world_size", range(1, 9))
+def test_batch_cap_is_sequence_aligned_across_world_sizes(world_size):
+    unit = 2048 * world_size
+    result = cap_batch_for_steps(524288, 1e16, 1e8, 500, unit)
+    assert result % unit == 0
+    assert result * 500 <= 1e16 / 1e8
+    assert 1e16 / 1e8 / 500 - result < unit
+
+
+def test_flop_horizon_is_used_only_for_budget_limited_runs():
+    assert scaling_token_horizon(3_000_000, 12, 1e15, 1e8, 500) == 10_000_000
+    assert scaling_token_horizon(3_000_000, 12, 1e16, 1e8, 500) == 100_000_000
+    assert scaling_token_horizon(3_000_000, 12, 1e15, 1e8, 0) == 36_000_000
+    with pytest.raises(ValueError):
+        scaling_token_horizon(3_000_000, 12, -1, 1e8, 500)

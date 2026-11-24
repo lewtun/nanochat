@@ -12,6 +12,9 @@ from collections import defaultdict
 import json
 from pathlib import Path
 import random
+import os
+import subprocess
+import tempfile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -22,7 +25,17 @@ def area(path):
     return '/'.join(parts[:3 if parts and parts[0] == 'Development' else 2]) or '(root)'
 
 
-def prepare(source, output, seed, shard_size):
+def atomic_manifest(path, payload):
+    with tempfile.NamedTemporaryFile('w', dir=path.parent, prefix='.manifest.', delete=False) as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write('\n')
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    os.replace(temporary, path)
+
+
+def prepare(source, output, seed, shard_size, source_tarball=None):
     manifest_path = output / 'data_manifest.json'
     if manifest_path.exists():
         old = json.loads(manifest_path.read_text())
@@ -62,6 +75,10 @@ def prepare(source, output, seed, shard_size):
     held_files = {f for selected in file_holdouts.values() for f in selected}
     train = [f for f in files if f.parent not in held and f not in held_files]
     val = [f for f in files if f.parent in held or f in held_files]
+    validation_hashes = {hashlib.sha256(f.read_bytes()).digest() for f in val}
+    duplicates = [f for f in train if hashlib.sha256(f.read_bytes()).digest() in validation_hashes]
+    duplicate_set = set(duplicates)
+    train = [f for f in train if f not in duplicate_set]
     random.Random(seed).shuffle(train)
     data = output / 'base_data'
     data.mkdir(parents=True, exist_ok=True)
@@ -77,7 +94,11 @@ def prepare(source, output, seed, shard_size):
     names.append(name)
     def stats(items):
         return {'files': len(items), 'bytes': sum(f.stat().st_size for f in items)}
+    git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parent, text=True).strip()
+    source_sha = hashlib.file_digest(source_tarball.open('rb'), 'sha256').hexdigest() if source_tarball else None
     manifest = {'schema_version': 1, 'status': 'PREPARED', 'dataset': 'alpo.ge/lean',
+                'git_sha': git_sha, 'source_tarball_sha256': source_sha,
+                'excluded_duplicate_train_files': [str(f.relative_to(source)) for f in duplicates],
                 'seed': seed, 'shard_size': shard_size, 'asset_prefix': 'rh', 'data_prefix': 'base_data', 'document_eos': True, 'parquet_files': names,
                 'num_train_shards': len(names)-1, 'validation_shard': name,
                 'held_out_directories': sorted(str(d.relative_to(source)) for d in held),
@@ -86,7 +107,7 @@ def prepare(source, output, seed, shard_size):
                 'uncovered_areas': [],
                 'train': stats(train), 'validation': stats(val),
                 'area_bytes': dict(sorted(area_bytes.items()))}
-    (output / 'data_manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    atomic_manifest(output / 'data_manifest.json', manifest)
     print(json.dumps({k: manifest[k] for k in ('train', 'validation', 'uncovered_areas')}, indent=2))
 
 
@@ -127,12 +148,13 @@ def count(output, bucket):
     manifest['data_bucket_path'] = f'hf://buckets/{bucket}/rh/base_data'
     manifest['tokenizer_vocab_size'] = tokenizer.get_vocab_size()
     manifest['status'] = 'COMPLETE'
-    path.write_text(json.dumps(manifest, indent=2) + '\n')
+    atomic_manifest(path, manifest)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path)
+    parser.add_argument('--source-tarball', type=Path, help='original archive for source fingerprint')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--shard-size', type=int, default=10000)
@@ -146,4 +168,4 @@ if __name__ == '__main__':
     else:
         if args.source is None or args.shard_size <= 0:
             parser.error('--source and positive --shard-size required')
-        prepare(args.source, args.output, args.seed, args.shard_size)
+        prepare(args.source, args.output, args.seed, args.shard_size, args.source_tarball)

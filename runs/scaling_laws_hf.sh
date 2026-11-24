@@ -34,13 +34,14 @@ fi
 EVAL_TOKENS="${EVAL_TOKENS:-52428800}"
 MIN_TOKEN_PARAM_RATIO="${MIN_TOKEN_PARAM_RATIO:-0.25}"
 MAX_TOKEN_PARAM_RATIO="${MAX_TOKEN_PARAM_RATIO:-1000}"
+export DATA_PREFIX EVAL_TOKENS CORE_METRIC MIN_TOKEN_PARAM_RATIO MAX_TOKEN_PARAM_RATIO NPROC_PER_NODE
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
 read -r -a DEPTHS <<< "${DEPTHS:-10 12 14 16 18 20}"
 
-RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,head_dim,asset_prefix,document_eos,tokenizer_sha256,tokenizer_bucket_path,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,total_batch_size,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
+RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,head_dim,asset_prefix,document_eos,tokenizer_sha256,tokenizer_bucket_path,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,total_batch_size,batch_lr_scale,weight_decay_scaled,validation_mode,eval_tokens,nproc_per_node,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -128,6 +129,9 @@ resolve_launcher_defaults() {
         HF_NAMESPACE="$(resolve_hf_namespace)"
     fi
     HF_BUCKET="${HF_BUCKET:-${HF_NAMESPACE}/nanochat-scaling-laws}"
+    if [[ "$HF_BUCKET" != "${HF_NAMESPACE}/nanochat-scaling-laws" && -z "$TRACKIO_SPACE_ID" ]]; then
+        die "Set TRACKIO_SPACE_ID explicitly when overriding HF_BUCKET"
+    fi
     TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-${HF_NAMESPACE}/nanochat-scaling-laws}"
     TRACKIO_BUCKET="${TRACKIO_BUCKET:-$HF_BUCKET}"
     if [[ -z "$GIT_REPO_URL" ]]; then
@@ -162,6 +166,16 @@ validate_settings() {
     [[ "$ASSET_PREFIX" != rh || ( "$DOCUMENT_EOS" == 1 && "$DATA_PREFIX" == base_data && "$HEAD_DIM" == 64 ) ]] || die "RH requires canonical data, EOS, and 64-channel heads"
     [[ "$MANIFEST_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$MANIFEST_PATH" != *..* && "$MANIFEST_PATH" != /* ]] || die "Invalid MANIFEST_PATH"
     [[ "$CORE_METRIC" == 0 || "$CORE_METRIC" == 1 ]] || die "CORE_METRIC must be 0 or 1"
+    [[ "$EVAL_TOKENS" =~ ^[1-9][0-9]*$ ]] || die "EVAL_TOKENS must be a positive integer"
+    run_python - "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" <<'PYWINDOW'
+import math, sys
+try:
+    lo, hi = map(float, sys.argv[1:])
+except ValueError:
+    raise SystemExit("Token:parameter bounds must be numeric")
+if not (math.isfinite(lo) and math.isfinite(hi) and 0 < lo <= hi):
+    raise SystemExit("Token:parameter bounds must satisfy 0 < MIN <= MAX")
+PYWINDOW
     [[ "$NANOCHAT_MOUNT" == "/mnt/nanochat" ]] || die "NANOCHAT_MOUNT is fixed to /mnt/nanochat"
     run_python - "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
 import re
@@ -291,13 +305,13 @@ assert bucket in text and mount in text, f"Expected {bucket} mounted at {mount}:
 
 parse_training_log() {
     local log_file="$1" flops_budget="$2" depth="$3" run_name="$4" train_time="$5"
-    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" "$ASSET_PREFIX" "$HEAD_DIM" "$DOCUMENT_EOS" "${TOKENIZER_SHA256:-}" "${TOKENIZER_BUCKET_PATH:-}" <<'PY'
+    run_python - "$log_file" "$flops_budget" "$depth" "$run_name" "$train_time" "${TRAIN_CORPUS_TOKENS:-0}" "$ASSET_PREFIX" "$HEAD_DIM" "$DOCUMENT_EOS" "${TOKENIZER_SHA256:-}" "${TOKENIZER_BUCKET_PATH:-}" "$EVAL_TOKENS" "$NPROC_PER_NODE" "$CORE_METRIC" <<'PY'
 import csv
 import math
 import re
 import sys
 
-log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text, asset_prefix, expected_head_dim, document_eos, tokenizer_sha256, tokenizer_bucket_path = sys.argv[1:]
+log_path, flops_budget, depth_text, run_name, train_time_text, corpus_tokens_text, asset_prefix, expected_head_dim, document_eos, tokenizer_sha256, tokenizer_bucket_path, eval_tokens, nproc, core_enabled = sys.argv[1:]
 text = open(log_path, encoding="utf-8", errors="replace").read()
 
 def last(pattern, label, flags=re.MULTILINE):
@@ -328,9 +342,13 @@ num_iterations = integer(
     "iteration count",
 )
 batch_size = integer(r"Total batch size\s+([\d,]+)\s+=>", "total batch size")
+batch_lr_scale = finite(r"Scaling optimizer: batch_lr_scale=([0-9.eE+-]+)", "batch LR scale", positive=True)
+weight_decay_scaled = finite(r"Scaling optimizer: batch_lr_scale=[0-9.eE+-]+ weight_decay=([0-9.eE+-]+)", "weight decay", positive=True)
 actual_flops = finite(r"Total training FLOPs estimate:\s+([0-9.eE+-]+)", "actual FLOPs", positive=True)
 val_bpb = finite(r"Validation bpb:\s+([0-9.eE+-]+)", "validation BPB", positive=True)
 core_matches = re.findall(r"CORE metric:\s+([0-9.eE+-]+)", text)
+if core_enabled == "1" and not core_matches:
+    raise SystemExit(f"Missing CORE score in {log_path}")
 core_score = float(core_matches[-1]) if core_matches else None
 throughput = integer(r"tok/sec:\s+([\d,]+)", "throughput")
 mfu = finite(r"bf16_mfu:\s+([0-9.eE+-]+)", "MFU")
@@ -364,6 +382,11 @@ row = [
     params[2] + params[3],
     num_iterations,
     batch_size,
+    f"{batch_lr_scale:.12g}",
+    f"{weight_decay_scaled:.12g}",
+    "full_documents" if document_eos == "1" else "fixed_tokens",
+    "" if document_eos == "1" else int(eval_tokens),
+    int(nproc),
     num_iterations * batch_size,
     text_tokens if unique_tokens else "",
     unique_tokens if unique_tokens else "",
@@ -439,6 +462,11 @@ payload = {
     "document_eos": os.environ["DOCUMENT_EOS"] == "1",
     "manifest_path": os.environ["MANIFEST_PATH"],
     "min_steps": int(os.environ["MIN_STEPS"]),
+    "data_prefix": os.environ["DATA_PREFIX"],
+    "eval_tokens": int(os.environ["EVAL_TOKENS"]),
+    "core_metric": os.environ["CORE_METRIC"] == "1",
+    "min_token_param_ratio": float(os.environ["MIN_TOKEN_PARAM_RATIO"]),
+    "max_token_param_ratio": float(os.environ["MAX_TOKEN_PARAM_RATIO"]),
     "data_manifest_git_sha": os.environ.get("DATA_MANIFEST_GIT_SHA", "unknown"),
     "tokenizer_sha256": os.environ["TOKENIZER_SHA256"],
     "tokenizer_bucket_path": os.environ["TOKENIZER_BUCKET_PATH"],
@@ -449,6 +477,13 @@ payload = {
     "depths": depths,
     "sweep_size": len(flops_budgets) * len(depths),
 }
+if target.exists():
+    old = json.loads(target.read_text())
+    keys = ("asset_prefix", "data_prefix", "head_dim", "min_steps", "document_eos", "eval_tokens",
+            "nproc_per_node", "tokenizer_sha256", "tokenizer_bucket_path", "core_metric", "git_sha")
+    changed = [key for key in keys if old.get(key) != payload[key]]
+    if changed:
+        raise SystemExit(f"Existing label has incompatible provenance: {', '.join(changed)}; use a new label")
 with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=".provenance.", suffix=".tmp", delete=False) as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
     handle.write("\n")
@@ -603,20 +638,21 @@ run_point() {
     fi
 
     local point_info ratio
-    if [[ -f "$RESULTS_DIR/skipped.csv" ]] && awk -F, -v f="$flops_budget" -v d="$depth" '$1 == f && $2 == d { found=1 } END { exit !found }' "$RESULTS_DIR/skipped.csv"; then
-        log "Skipping previously excluded point $point_name"
-        return
-    fi
     point_info="$(run_python -m scripts.scaling_point --depth "$depth" --flops "$flops_budget" --vocab-size "$TOKENIZER_VOCAB_SIZE" --head-dim "$HEAD_DIM")"
     ratio="$(run_python -c 'import json,sys; print(json.loads(sys.argv[1])["tokens_per_param"])' "$point_info")"
-    if ! run_python - "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" <<'PYRATIO'
-import sys
+    local inside_window
+    inside_window="$(run_python - "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" <<'PYRATIO'
+import math, sys
 ratio, lower, upper = map(float, sys.argv[1:])
-raise SystemExit(0 if lower <= ratio <= upper else 1)
+if not math.isfinite(ratio):
+    raise SystemExit('Non-finite token-to-parameter ratio')
+print('yes' if lower <= ratio <= upper else 'no')
 PYRATIO
-    then
+)"
+    if [[ "$inside_window" == no ]]; then
         log "Skipping $point_name: estimated tokens:params $ratio outside [$MIN_TOKEN_PARAM_RATIO, $MAX_TOKEN_PARAM_RATIO]"
-        printf '%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" >> "$RESULTS_DIR/skipped.csv"
+        printf '%s,%s,%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" >> "$RESULTS_DIR/skipped.csv"
+        skipped_count=$((skipped_count + 1))
         return
     fi
     if ! run_python - "$point_info" "$flops_budget" "$MIN_STEPS" "$NPROC_PER_NODE" <<'PYSTEPS'
@@ -626,7 +662,8 @@ raise SystemExit(0 if not min_steps or budget / info['flops_per_token'] >= min_s
 PYSTEPS
     then
         log "Skipping $point_name: budget cannot fit $MIN_STEPS steps at the minimum distributed batch"
-        printf '%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" >> "$RESULTS_DIR/skipped.csv"
+        printf '%s,%s,%s,%s,%s\n' "$flops_budget" "$depth" "$ratio" "$MIN_TOKEN_PARAM_RATIO" "$MAX_TOKEN_PARAM_RATIO" >> "$RESULTS_DIR/skipped.csv"
+        skipped_count=$((skipped_count + 1))
         return
     fi
     if (( depth >= 28 )); then
@@ -683,8 +720,17 @@ PYSTEPS
     [[ -f "${models[0]}" && ${#models[@]} -eq 1 ]] || die "Expected one final model checkpoint"
     local model_file="${models[0]}" suffix="${models[0]##*/model_}"
     [[ -f "$checkpoint_source/meta_${suffix%.pt}.json" ]] || die "Missing final checkpoint metadata"
-    cp "$model_file" "$checkpoint_dest/"
-    cp "$checkpoint_source/meta_${suffix%.pt}.json" "$checkpoint_dest/"
+    local meta_file="$checkpoint_source/meta_${suffix%.pt}.json"
+    local file target
+    for file in "$model_file" "$meta_file"; do
+        target="$checkpoint_dest/${file##*/}"
+        cp "$file" "$target.partial"
+        [[ "$(stat -c %s "$file")" == "$(stat -c %s "$target.partial")" ]] || die "Incomplete checkpoint copy: $target"
+        mv -f "$target.partial" "$target"
+    done
+    for file in "$checkpoint_dest"/model_*.pt "$checkpoint_dest"/meta_*.json; do
+        [[ "$file" == "$checkpoint_dest/${model_file##*/}" || "$file" == "$checkpoint_dest/${meta_file##*/}" ]] || rm -f "$file"
+    done
     printf '%s\n' "$row" >> "$RESULTS_FILE"
     cleanup_checkpoint "$runtime_base/base_checkpoints/$model_tag" "$runtime_base"
     log "Completed $point_name"
@@ -774,21 +820,27 @@ if any(int(byte_lengths[i]) != 0 for i in special.values()):
 PYEOS
     fi
 
+    local skipped_count=0
     for flops_budget in "${FLOPS_BUDGETS[@]}"; do
         for depth in "${DEPTHS[@]}"; do
             run_point "$flops_budget" "$depth" "$runtime_base"
         done
     done
 
-    row_count="$(run_python - "$RESULTS_FILE" <<'PY'
+    row_count="$(run_python - "$RESULTS_FILE" "${#FLOPS_BUDGETS[@]}" "${FLOPS_BUDGETS[@]}" "${DEPTHS[@]}" <<'PY'
 import csv
 import sys
+count = int(sys.argv[2])
+budgets = set(map(float, sys.argv[3:3+count]))
+depths = set(map(int, sys.argv[3+count:]))
 with open(sys.argv[1], newline="") as handle:
-    print(sum(1 for _ in csv.DictReader(handle)))
+    points = [(float(row['flops_budget']), int(row['depth'])) for row in csv.DictReader(handle)]
+points = [p for p in points if p[0] in budgets and p[1] in depths]
+if len(points) != len(set(points)):
+    raise SystemExit('Duplicate results in requested grid')
+print(len(points))
 PY
 )"
-    local skipped_count=0
-    [[ ! -f "$RESULTS_DIR/skipped.csv" ]] || skipped_count="$(wc -l < "$RESULTS_DIR/skipped.csv")"
     expected_rows=$((${#FLOPS_BUDGETS[@]} * ${#DEPTHS[@]}))
     [[ $((row_count + skipped_count)) -eq "$expected_rows" ]] || die "Expected $expected_rows points, found $row_count completed and $skipped_count skipped"
     write_status COMPLETE
