@@ -10,7 +10,6 @@ from pathlib import Path
 
 import torch
 from tiktoken.load import dump_tiktoken_bpe
-from tokenizers import processors
 from transformers import PreTrainedTokenizerFast
 from transformers.convert_slow_tokenizer import TikTokenConverter
 from .configuration_rh_nanochat import RHNanoChatConfig
@@ -35,7 +34,6 @@ def convert_tokenizer(tokenizer_dir, output_dir, sequence_len=2048):
     bos = enc._special_tokens['<|bos|>']
     if enc._special_tokens['<|eos|>'] == bos:
         raise ValueError('BOS and EOS must have distinct token IDs')
-    backend.post_processor = processors.TemplateProcessing(single='<|bos|> $A', pair='<|bos|> $A $B', special_tokens=[('<|bos|>', bos)])
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, bos_token='<|bos|>', eos_token='<|eos|>', pad_token='<|eos|>', padding_side='left', model_max_length=sequence_len, add_bos_token=True, additional_special_tokens=[s for s, _ in specials if s != '<|bos|>'])
     tokenizer.save_pretrained(output_dir)
     return enc.n_vocab
@@ -45,8 +43,29 @@ def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None, results_markdo
     if (results_markdown is None) != (assets_dir is None):
         raise ValueError('Provide both results_markdown and assets_dir, or neither')
     checkpoint_dir, output_dir = Path(checkpoint_dir), Path(output_dir)
-    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
-        raise FileExistsError(f'Output directory is not empty: {output_dir}; use --overwrite')
+    if output_dir.is_symlink():
+        raise ValueError('Output directory must not be a symlink')
+    output_resolved = output_dir.resolve()
+    inputs = [checkpoint_dir, Path(tokenizer_dir)]
+    if results_markdown:
+        inputs.extend([Path(results_markdown), Path(assets_dir)])
+    if any(path.resolve().is_relative_to(output_resolved) for path in inputs):
+        raise ValueError('Output directory must not contain any input')
+
+    def check_output():
+        if output_dir.is_symlink():
+            raise ValueError('Output directory must not be a symlink')
+        if output_dir.exists():
+            if not overwrite:
+                raise FileExistsError(f'Output already exists: {output_dir}; use --overwrite')
+            marker = output_dir / 'config.json'
+            try:
+                is_export = json.loads(marker.read_text()).get('model_type') == 'rh_nanochat'
+            except (OSError, ValueError, AttributeError):
+                is_export = False
+            if not is_export:
+                raise ValueError('Refusing to overwrite a directory that is not an RH nanochat export')
+    check_output()
     if step is None:
         steps = [int(m.group(1)) for p in checkpoint_dir.glob('model_*.pt') if (m := re.fullmatch(r'model_(\d+)\.pt', p.name))]
         if not steps:
@@ -65,7 +84,10 @@ def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None, results_markdo
     results = Path(results_markdown).read_text(encoding='utf-8') if results_markdown else None
     assets = []
     if results is not None:
-        for link in re.findall(r'!\[[^\]]*\]\((assets/[^\s)]+)(?:\s+[^)]*)?\)', results):
+        image_pattern = r'!\[[^\]]*\]\((assets/[^\s)]+)(?:\s+[^)]*)?\)'
+        if re.search(r'(?:\./)?assets/', re.sub(image_pattern, '', results)):
+            raise ValueError('Asset references must use inline ![alt](assets/image.png) syntax')
+        for link in re.findall(image_pattern, results):
             relative = Path(link).relative_to('assets')
             source = Path(assets_dir) / relative
             if relative.is_absolute() or '..' in relative.parts or any((Path(assets_dir) / Path(*relative.parts[:i])).is_symlink() for i in range(1, len(relative.parts) + 1)) or not source.is_file() or source.suffix.lower() not in {'.png', '.jpg', '.jpeg', '.webp', '.svg'}:
@@ -106,15 +128,22 @@ def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None, results_markdo
             card += '\n## Scaling-law results\n\nAdd isoFLOP curves, best loss, optimal N and D with fitted exponents, tokens:params, per-directory difficulty and the optimal-configurations table before sharing the final model.\n'
         (dest / 'README.md').write_text(card, encoding='utf-8')
         # Preserve the old output until the complete replacement is built.
-        old = Path(temp) / 'old'
+        check_output()
+        # The backup is outside the temporary directory so a failed restore is recoverable.
+        old = Path(temp + '-backup')
         if output_dir.exists():
             output_dir.rename(old)
         try:
             dest.rename(output_dir)
         except Exception:
             if old.exists():
-                old.rename(output_dir)
+                try:
+                    old.rename(output_dir)
+                except OSError as exc:
+                    raise RuntimeError(f'Could not restore previous export; backup remains at {old}') from exc
             raise
+        if old.exists():
+            shutil.rmtree(old)
 
 
 if __name__ == '__main__':

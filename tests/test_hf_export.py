@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import torch
-pytest.importorskip("transformers")
+pytest.importorskip("transformers", reason="Transformers export tests require Python 3.11 and transformers 5.24")
 pytest.importorskip("blobfile")
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from nanochat.gpt import GPT, GPTConfig
@@ -135,16 +135,20 @@ def test_convert_roundtrip(tmp_path):
     torch.testing.assert_close(submodel(ids).logits, model(ids).logits)
 
 
-def test_climbmix(tmp_path):
+def test_real_tokenizer(tmp_path):
     path = Path(os.environ.get('RH_TEST_TOKENIZER', '/nonexistent'))
     if not (path / 'tokenizer.pkl').exists():
-        pytest.skip('ClimbMix tokenizer unavailable')
+        pytest.skip('Set RH_TEST_TOKENIZER to the EOS tokenizer directory')
     original = RustBPETokenizer.from_directory(path)
+    if '<|eos|>' not in original.enc._special_tokens:
+        pytest.skip('Real tokenizer has no distinct EOS token')
     convert_tokenizer(path, tmp_path)
     fast = AutoTokenizer.from_pretrained(tmp_path)
     text = 'theorem foo : ℕ := 42\n∀ x, x = x'
     assert fast.encode(text, add_special_tokens=False) == original.encode(text)
     assert fast.decode(original.encode(text)) == text
+    assert fast.encode(text) == [original.get_bos_token_id()] + original.encode(text)
+    assert fast.eos_token_id == original.encode_special('<|eos|>')
 
 
 def test_bfloat16(monkeypatch):
@@ -164,13 +168,15 @@ def test_bfloat16(monkeypatch):
     torch.testing.assert_close(last, expected[:, -1:], atol=0.002, rtol=0.01)
 
 
-def test_real_lean_climbmix(tmp_path):
+def test_real_lean_tokenizer(tmp_path):
     path = Path(os.environ.get('RH_TEST_TOKENIZER', '/nonexistent'))
     root = Path(os.environ.get('RH_TEST_LEAN', '/nonexistent'))
     sources = [root / 'Main.lean', root / 'Statements.lean']
     if not (path / 'tokenizer.pkl').exists() or not all(p.exists() for p in sources):
-        pytest.skip('Lean corpus or ClimbMix tokenizer unavailable')
+        pytest.skip('Set RH_TEST_TOKENIZER and RH_TEST_LEAN for real-data parity')
     original = RustBPETokenizer.from_directory(path)
+    if '<|eos|>' not in original.enc._special_tokens:
+        pytest.skip('Real tokenizer has no distinct EOS token')
     convert_tokenizer(path, tmp_path)
     fast = AutoTokenizer.from_pretrained(tmp_path)
     for source in sources:
@@ -178,6 +184,8 @@ def test_real_lean_climbmix(tmp_path):
         ids = original.encode(text)
         assert fast.encode(text, add_special_tokens=False) == ids
         assert fast.decode(ids) == original.decode(ids)
+        assert fast.encode(text) == [original.get_bos_token_id()] + ids
+        assert fast.eos_token_id == original.encode_special('<|eos|>')
 
 
 def test_beam_generation_cache():
@@ -234,31 +242,61 @@ def test_prompt_lookup_and_cache_crop():
     assert torch.equal(plain, assisted)
     pre = model(prompt)
     pre.cache.crop(-7)
-    result = model(prompt[:, 5:8], cache=pre.cache).logits
-    torch.testing.assert_close(result, model(prompt[:, :8], use_cache=False).logits[:, 5:], atol=2e-6, rtol=2e-5)
+    replacement = torch.tensor([[19, 20, 21]])
+    model(replacement, cache=pre.cache)
+    result = model(torch.tensor([[22]]), cache=pre.cache).logits
+    fresh = torch.cat((prompt[:, :5], replacement, torch.tensor([[22]])), dim=1)
+    torch.testing.assert_close(result, model(fresh, use_cache=False).logits[:, -1:], atol=2e-6, rtol=2e-5)
 
 
 def test_upload_guard(tmp_path, monkeypatch):
+    import fnmatch
     import hf_export.upload as upload
+    local = tmp_path / 'local'; local.mkdir()
     for name in ('config.json', 'tokenizer.json', 'model.safetensors', 'configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'):
-        (tmp_path / name).write_text('test')
+        (local / name).write_text('test')
+    remote = {'configuration_rh_nanochat.py': 'test', 'modeling_rh_nanochat.py': 'test',
+              'runA/config.json': 'old', 'runA/model.safetensors': 'weights',
+              'runB/config.json': 'old', 'runB/model.safetensors': 'weights',
+              'model.safetensors': 'old', 'assets/old.png': 'old'}
     calls = []
     class API:
-        def repo_info(self, *args, **kwargs): return SimpleNamespace(private=self.private)
-        def file_exists(self, *args, **kwargs): return False
+        private = False
+        def repo_info(self, *args, **kwargs): return SimpleNamespace(private=self.private, sha='revision')
+        def file_exists(self, repo, path, **kwargs):
+            assert kwargs['revision'] == 'revision'
+            return path in remote
+        def list_repo_files(self, *args, **kwargs):
+            assert kwargs['revision'] == 'revision'
+            return list(remote)
         def upload_file(self, **kwargs): calls.append(kwargs)
         def upload_folder(self, **kwargs): calls.append(kwargs)
+    def download(repo, name, **kwargs):
+        assert kwargs['revision'] == 'revision'
+        p = tmp_path / 'download'; p.write_text(remote[name]); return str(p)
     api = API(); monkeypatch.setattr(upload, 'HfApi', lambda: api)
-    monkeypatch.setattr(sys, 'argv', ['upload', str(tmp_path), 'owner/repo', '--path-in-repo', 'run'])
-    api.private = False
-    with pytest.raises(ValueError, match='public'):
-        upload.main()
-    assert not calls
+    monkeypatch.setattr(upload, 'hf_hub_download', download)
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--path-in-repo', './runA'])
+    with pytest.raises(ValueError, match='public'): upload.main()
     api.private = True
+    with pytest.raises(FileExistsError): upload.main()
+    remote['modeling_rh_nanochat.py'] = 'different'
+    monkeypatch.setattr(sys, 'argv', [*sys.argv, '--overwrite'])
+    with pytest.raises(ValueError, match='differs'): upload.main()
+    remote['modeling_rh_nanochat.py'] = 'test'
     upload.main()
-    assert calls[-1]['path_in_repo'] == 'run'
-    assert '*.pt' in calls[-1]['ignore_patterns'] and '*.pkl' in calls[-1]['ignore_patterns']
-    assert {c['path_in_repo'] for c in calls[:-1]} == {'configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'}
+    assert len(calls) == 1 and calls[-1]['path_in_repo'] == 'runA'
+    assert calls[-1]['delete_patterns'] == ['model.safetensors']
+    assert '*.pt' in calls[-1]['ignore_patterns']
+    calls.clear()
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
+    upload.main()
+    patterns = calls[-1]['delete_patterns']
+    deleted = {key for key in remote if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)}
+    assert deleted == {'model.safetensors', 'assets/old.png'}
+    assert 'runA/model.safetensors' not in deleted and 'runB/model.safetensors' not in deleted
+    remote['modeling_rh_nanochat.py'] = 'different'
+    with pytest.raises(ValueError, match='differs'): upload.main()
 
 
 def test_portable_tokenizer(tmp_path):
@@ -297,10 +335,27 @@ def test_conversion_provenance_and_strict_weights(tmp_path):
         (ckpt / f'meta_{step:06d}.json').write_text(json.dumps({'model_config': vars(orig.config), 'tokenizer_sha256': sha}))
     with pytest.raises(ValueError, match='conflicts'):
         convert(ckpt, tokdir, out, tokenizer_sha256='0' * 64)
+    meta_file = ckpt / 'meta_000002.json'
+    meta = json.loads(meta_file.read_text())
+    meta['tokenizer_sha256'] = '0' * 64; meta_file.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match='does not match'): convert(ckpt, tokdir, out)
+    assert not out.exists()
+    del meta['tokenizer_sha256']; meta_file.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match='no tokenizer_sha256'): convert(ckpt, tokdir, out)
+    with pytest.raises(ValueError, match='does not match'): convert(ckpt, tokdir, out, tokenizer_sha256='0' * 64)
+    assert not out.exists()
+    for protected in (ckpt, tokdir, tmp_path):
+        with pytest.raises(ValueError, match='must not contain'): convert(ckpt, tokdir, protected, overwrite=True)
+    assert (ckpt / 'model_000002.pt').exists() and (tokdir / 'tokenizer.pkl').exists()
+    convert(ckpt, tokdir, out, tokenizer_sha256=sha)
+    shutil.rmtree(out)
+    meta['tokenizer_sha256'] = sha; meta_file.write_text(json.dumps(meta))
     convert(ckpt, tokdir, out)
     config = json.loads((out / 'config.json').read_text())
     assert (config['checkpoint_step'], config['window_pattern'], config['max_position_embeddings'], config['tokenizer_sha256']) == (2, 'S', 640, sha)
-    model = AutoModelForCausalLM.from_pretrained(out, trust_remote_code=True, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(out, trust_remote_code=True, dtype=torch.float32, attn_implementation='sdpa', max_position_embeddings=1024)
+    assert model.config.training_sequence_len == 640 and model.config.max_position_embeddings == 1024
+    assert model.config.base_model_tp_plan is None
     orig.load_state_dict({k: v.float() for k, v in state.items()}, assign=True)
     ids = torch.randint(0, 270, (1, 400))
     torch.testing.assert_close(model(ids).logits, orig(ids), atol=2e-6, rtol=2e-5)
@@ -351,3 +406,45 @@ def test_reset_and_output_contract():
     torch.testing.assert_close(selected, model(ids, use_cache=False).logits[:, [0, 2]])
     with pytest.raises(ValueError, match='output_hidden_states'):
         model(ids, output_hidden_states=True)
+
+
+def test_export_safety_and_asset_validation(tmp_path):
+    tokenizer = train_tokenizer(iter(['theorem foo : Nat := 42\n' * 100, '∀ x : ℕ, x = x\n' * 100]), 270)
+    tokdir, ckpt, out, assets = (tmp_path / name for name in ('tok', 'ckpt', 'out', 'assets'))
+    tokdir.mkdir(); ckpt.mkdir(); assets.mkdir(); tokenizer.save(tokdir)
+    original, _ = models(2)
+    torch.save(original.state_dict(), ckpt / 'model_000001.pt')
+    sha = hashlib.sha256((tokdir / 'tokenizer.pkl').read_bytes()).hexdigest()
+    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(original.config), 'tokenizer_sha256': sha}))
+    unrelated = tmp_path / 'unrelated'; unrelated.mkdir(); (unrelated / 'precious').write_text('keep')
+    with pytest.raises(ValueError, match='not an RH nanochat export'):
+        convert(ckpt, tokdir, unrelated, overwrite=True)
+    assert (unrelated / 'precious').read_text() == 'keep'
+    link = tmp_path / 'link'; link.symlink_to(unrelated, target_is_directory=True)
+    with pytest.raises(ValueError, match='symlink'):
+        convert(ckpt, tokdir, link, overwrite=True)
+    results = tmp_path / 'results.md'
+    (assets / 'notes.txt').write_text('not an image')
+    for text in ('![x](assets/notes.txt)', '![x](assets/../x.png)', '![x](assets/missing.png)', '<img src="assets/a.png">'):
+        results.write_text(text)
+        with pytest.raises(ValueError): convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
+        assert not out.exists()
+    (assets / 'a.png').write_bytes(b'image'); (assets / 'unreferenced.png').write_bytes(b'no')
+    results.write_text('![x](assets/a.png)')
+    convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
+    assert (out / 'assets/a.png').exists() and not (out / 'assets/unreferenced.png').exists()
+    (out / 'assets/stale.png').write_bytes(b'stale')
+    convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets, overwrite=True)
+    assert not (out / 'assets/stale.png').exists()
+
+
+def test_config_validation_and_static_cache():
+    from transformers.cache_utils import StaticCache
+    assert RHNanoChatConfig().intermediate_size == 3072
+    for kwargs in ({'rope_parameters': {'rope_type': 'default', 'rope_theta': 10000}},
+                   {'rms_norm_eps': 1e-6}, {'final_logit_softcapping': 30.0}):
+        with pytest.raises(ValueError): RHNanoChatConfig(**kwargs)
+    _, model = models(2)
+    cache = StaticCache(config=model.config, max_cache_len=32)
+    with pytest.raises(ValueError, match='Static cache'):
+        model(torch.tensor([[1, 2, 3]]), cache=cache)

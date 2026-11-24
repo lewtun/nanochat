@@ -80,7 +80,7 @@ class RHNanoChatForCausalLM(NanoChatForCausalLM):
     _tied_weights_keys = {}
     supports_gradient_checkpointing = False
     _supports_flash_attn = False
-    _supports_sdpa = False
+    _supports_sdpa = True
     _supports_flex_attn = False
     _supports_attention_backend = False
     _no_split_modules = ["Block"]
@@ -121,10 +121,10 @@ class RHNanoChatForCausalLM(NanoChatForCausalLM):
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, cache=None, use_cache=None, labels=None, logits_to_keep=0, **kwargs):
         if kwargs.get("output_hidden_states", self.config.output_hidden_states) or kwargs.get("output_attentions", self.config.output_attentions):
             raise ValueError("output_hidden_states and output_attentions are not supported")
-        if attention_mask is not None and attention_mask.ndim != 2:
-            raise ValueError("Only a 2D attention mask is supported")
         if cache is not None and cache.is_compileable:
             raise ValueError("Static cache is not supported")
+        if attention_mask is not None and attention_mask.ndim != 2:
+            raise ValueError("Only a 2D attention mask is supported")
         use_cache = self.config.use_cache if use_cache is None else use_cache
         if input_ids is None:
             raise ValueError("input_ids are required")
@@ -136,6 +136,8 @@ class RHNanoChatForCausalLM(NanoChatForCausalLM):
             position_ids = torch.arange(start, start + t, device=input_ids.device).unsqueeze(0)
         x = norm(self.transformer.wte(input_ids))
         history = getattr(cache, "rh_embedding_history", None) if cache is not None else None
+        if start and history is not None and history.size(0) != input_ids.size(0):
+            raise ValueError("Cache batch size changed without updating embedding history")
         if start and (history is None or history.size(1) < start):
             raise ValueError("Cache is missing embedding history needed for smear")
         prev = history[:, start-1:start] if start else None
@@ -154,12 +156,12 @@ class RHNanoChatForCausalLM(NanoChatForCausalLM):
         inv = 1.0 / (100000 ** (torch.arange(0, d, 2, device=x.device, dtype=torch.float32) / d))
         freqs = position_ids.float().unsqueeze(-1) * inv
         cos, sin = freqs.cos().to(x.dtype).unsqueeze(2), freqs.sin().to(x.dtype).unsqueeze(2)
-        short = -(-self.config.max_position_embeddings // 4 // 128) * 128
+        short = -(-self.config.training_sequence_len // 4 // 128) * 128
         backout = None
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](input_ids).to(x.dtype) if str(i) in self.value_embeds else None
-            window = short if self.config.window_pattern.upper()[i % len(self.config.window_pattern)] == 'S' and i != len(self.transformer.h) - 1 else self.config.max_position_embeddings
+            window = short if self.config.window_pattern.upper()[i % len(self.config.window_pattern)] == 'S' and i != len(self.transformer.h) - 1 else self.config.training_sequence_len
             x = block(x, ve, cos, sin, window, cache, attention_mask)
             if i == len(self.transformer.h) // 2:
                 backout = x

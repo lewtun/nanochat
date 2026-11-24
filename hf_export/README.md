@@ -6,7 +6,7 @@ Install the development dependencies using Python 3.11 or newer. Conversion requ
 python -m hf_export.convert CHECKPOINT_DIR TOKENIZER_DIR OUTPUT_DIR
 ```
 
-The converter chooses the latest numbered checkpoint and verifies `tokenizer.pkl` against `tokenizer_sha256` in its metadata. For legacy runs without that field, establish the training tokenizer's SHA256 independently and pass it as `--tokenizer-sha256 HASH`; matching vocabulary size alone is insufficient. Conversion writes to a temporary directory first and refuses to replace a nonempty output unless `--overwrite` is supplied.
+The converter chooses the latest numbered checkpoint and verifies `tokenizer.pkl` against `tokenizer_sha256` in its metadata. For legacy runs without that field, establish the training tokenizer's SHA256 independently and pass it as `--tokenizer-sha256 HASH`; matching vocabulary size alone is insufficient. Conversion writes to a temporary directory first. `--overwrite` replaces the entire prior export directory, including its card and assets; it refuses non-export directories and any directory containing an input.
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
