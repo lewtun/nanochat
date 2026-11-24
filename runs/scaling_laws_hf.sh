@@ -166,6 +166,7 @@ validate_settings() {
     [[ -z "$ASSET_PREFIX" || ( "$ASSET_PREFIX" =~ ^[A-Za-z0-9._-]+$ && "$ASSET_PREFIX" != "." && "$ASSET_PREFIX" != ".." ) ]] || die "Invalid ASSET_PREFIX"
     [[ "$HEAD_DIM" =~ ^[1-9][0-9]*$ && "$MIN_STEPS" =~ ^[0-9]+$ ]] || die "Invalid HEAD_DIM or MIN_STEPS"
     [[ "$DOCUMENT_EOS" == 0 || "$DOCUMENT_EOS" == 1 ]] || die "Invalid DOCUMENT_EOS"
+    [[ "$TRAIN_SEED" =~ ^[0-9]+$ && ( "$EFFICIENT_BATCH" == 0 || "$EFFICIENT_BATCH" == 1 ) ]] || die "Invalid TRAIN_SEED or EFFICIENT_BATCH"
     [[ "$ASSET_PREFIX" != rh || ( "$DOCUMENT_EOS" == 1 && "$DATA_PREFIX" == base_data && "$HEAD_DIM" == 64 ) ]] || die "RH requires canonical data, EOS, and 64-channel heads"
     [[ "$MANIFEST_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$MANIFEST_PATH" != *..* && "$MANIFEST_PATH" != /* ]] || die "Invalid MANIFEST_PATH"
     [[ "$CORE_METRIC" == 0 || "$CORE_METRIC" == 1 ]] || die "CORE_METRIC must be 0 or 1"
@@ -476,6 +477,7 @@ payload = {
     "min_token_param_ratio": float(os.environ["MIN_TOKEN_PARAM_RATIO"]),
     "max_token_param_ratio": float(os.environ["MAX_TOKEN_PARAM_RATIO"]),
     "data_manifest_git_sha": os.environ.get("DATA_MANIFEST_GIT_SHA", "unknown"),
+    "data_manifest_sha256": os.environ["DATA_MANIFEST_SHA256"],
     "tokenizer_sha256": os.environ["TOKENIZER_SHA256"],
     "tokenizer_bucket_path": os.environ["TOKENIZER_BUCKET_PATH"],
     "trackio_space_id": os.environ["TRACKIO_SPACE_ID"],
@@ -485,14 +487,16 @@ payload = {
     "depths": depths,
     "sweep_size": len(flops_budgets) * len(depths),
 }
-if target.exists():
+results = target.parent / 'results.csv'
+has_rows = results.exists() and sum(1 for _ in results.open()) > 1
+if target.exists() and has_rows:
     old = json.loads(target.read_text())
     keys = ("asset_prefix", "data_prefix", "head_dim", "min_steps", "document_eos", "eval_tokens",
             "nproc_per_node", "tokenizer_sha256", "tokenizer_bucket_path", "core_metric", "git_sha",
-            "train_seed", "efficient_batch", "data_manifest_git_sha")
+            "train_seed", "efficient_batch", "data_manifest_git_sha", "data_manifest_sha256")
     changed = [key for key in keys if old.get(key) != payload[key]]
     if changed:
-        raise SystemExit(f"Existing label has incompatible provenance: {', '.join(changed)}; use a new label")
+        raise SystemExit(f"Existing label has incompatible provenance: {', '.join(changed)}; use a new label or resume with GIT_REF={old.get('git_sha')}")
 with tempfile.NamedTemporaryFile("w", dir=target.parent, prefix=".provenance.", suffix=".tmp", delete=False) as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
     handle.write("\n")
@@ -791,6 +795,7 @@ PY
     data_manifest_path="$NANOCHAT_MOUNT/$MANIFEST_PATH"
     [[ -f "$data_manifest_path" ]] || die "Missing $data_manifest_path"
     DATA_MANIFEST_GIT_SHA="$(validate_data_manifest_stream < "$data_manifest_path")"
+    DATA_MANIFEST_SHA256="$(run_python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$data_manifest_path")"
     run_python - "$data_manifest_path" "$DATA_PREFIX" "$DOCUMENT_EOS" "$ASSET_PREFIX" <<'PYDATA'
 import json, sys
 manifest = json.load(open(sys.argv[1]))
@@ -803,7 +808,7 @@ if sys.argv[4] == 'rh' and (manifest.get('asset_prefix') != 'rh' or not manifest
 PYDATA
     TRAIN_CORPUS_TOKENS="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("train", {}).get("tokens", 0))' "$data_manifest_path")"
     TOKENIZER_VOCAB_SIZE="$(run_python -c 'import json,sys; print(json.load(open(sys.argv[1]))["tokenizer_vocab_size"])' "$data_manifest_path")"
-    export DATA_MANIFEST_GIT_SHA TRAIN_CORPUS_TOKENS TOKENIZER_VOCAB_SIZE
+    export DATA_MANIFEST_GIT_SHA DATA_MANIFEST_SHA256 TRAIN_CORPUS_TOKENS TOKENIZER_VOCAB_SIZE
     [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl" ]] || die "Missing tokenizer.pkl"
     [[ -s "$NANOCHAT_MOUNT/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/token_bytes.pt" ]] || die "Missing token_bytes.pt"
     TOKENIZER_BUCKET_PATH="hf://buckets/${HF_BUCKET}/${ASSET_PREFIX:+$ASSET_PREFIX/}tokenizer/tokenizer.pkl"
@@ -828,10 +833,11 @@ PYSHA
     mkdir -p "$RESULTS_DIR"
     export RESULTS_DIR RESULTS_FILE
     acquire_writer_lock
-    trap 'exit_code=$?; if [[ $exit_code -ne 0 ]]; then write_status FAILED "$exit_code" || true; fi; release_writer_lock || true' EXIT
-    write_status RUNNING
+    trap 'release_writer_lock || true' EXIT
     write_provenance
     assert_results_file
+    write_status RUNNING
+    trap 'exit_code=$?; if [[ $exit_code -ne 0 ]]; then write_status FAILED "$exit_code" || true; fi; release_writer_lock || true' EXIT
 
     runtime_base="/workspace/nanochat-runtime-${JOB_ID:-local}"
     mkdir -p "$runtime_base/base_checkpoints"
