@@ -235,7 +235,7 @@ for budget in sorted({r['flops_budget'] for r in rows}):
     xx=np.linspace(np.log10(opt['fit_min_params']),np.log10(opt['fit_max_params']),120)
     ax.plot(10**xx,np.polyval([opt['quadratic_a'],opt['quadratic_b'],opt['quadratic_c']],xx),color=line.get_color(),alpha=.65)
 ax.set(xscale='log',xlabel='Effective parameters',ylabel='Validation bits per byte',title='IsoFLOP curves'); ax.legend(fontsize=8); fig.savefig(plot_dir/'isoflop.png'); plt.close(fig)
-fig,ax=plt.subplots(figsize=(6,4)); ax.plot([r['flops'] for r in optimal],[r['val_bpb'] for r in optimal],'o-'); ax.set(xscale='log',xlabel='Training FLOPs',ylabel='Optimal fitted bits per byte',title='Best validation loss vs compute'); fig.savefig(plot_dir/'best_loss.png'); plt.close(fig)
+fig,ax=plt.subplots(figsize=(6,4)); ax.plot([r['flops'] for r in optimal],[r['val_bpb'] for r in optimal],'o-'); ax.set(xscale='log',xlabel='Training FLOPs',ylabel='Optimal fitted bits per byte',title='Fitted optimal validation loss vs compute'); fig.savefig(plot_dir/'best_loss.png'); plt.close(fig)
 fig,axes=plt.subplots(1,2,figsize=(10,4))
 for ax,key,ylabel,coeff,exponent in zip(axes,['effective_params','tokens'],['Optimal effective parameters','Optimal training tokens'],['params_coefficient','tokens_coefficient'],['params_exponent','tokens_exponent']):
     for label,color in [('fresh','#2878b5'),('repeated','#dc7633')]:
@@ -281,12 +281,17 @@ for regime in ('fresh','repeated'):
             ni, di = fit['params_exponent_ci'], fit['tokens_exponent_ci']
             intervals = f" Noise-only bootstrap 95% intervals are [{ni[0]:.3f}, {ni[1]:.3f}] and [{di[0]:.3f}, {di[1]:.3f}], respectively; they exclude uncertainty from the fitting-window choice."
         card += [f"For {regime} data, the fitted exponents are N ∝ C^{fit['params_exponent']:.3f} and D ∝ C^{fit['tokens_exponent']:.3f}." + intervals, '']
-card += ['| FLOPs | Effective parameters (95% CI) | Training tokens | Tokens/parameter | Fitted BPB | Best measured BPB | Passes |','| ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+card += ['', 'Regime labels use interpolated passes at the optimum; individual models in a fit window can fall on the other side of one pass.', '']
+card += ['| FLOPs | Effective parameters (noise-only 95% CI) | Training tokens | Tokens/parameter (noise-only 95% CI) | Fitted BPB | Best measured BPB | Passes |','| ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
 for r in optimal:
-    card.append(f"| {r['flops']:.3g} | {r['effective_params']:,.0f} ({r['params_ci_low']:,.0f}–{r['params_ci_high']:,.0f}) | {r['tokens']:,.0f} | {r['ratio']:.2f} | {r['val_bpb']:.4f} | {r['best_measured_bpb']:.4f} | {r['passes']:.2f} |")
+    n_ci = f"{r['params_ci_low']:,.0f}–{r['params_ci_high']:,.0f}" if np.isfinite(r['params_ci_low']) else 'unresolved'
+    ratio_ci = f"{r['ratio_ci_low']:.2f}–{r['ratio_ci_high']:.2f}" if np.isfinite(r['ratio_ci_low']) else 'unresolved'
+    card.append(f"| {r['flops']:.3g} | {r['effective_params']:,.0f} ({n_ci}) | {r['tokens']:,.0f} | {r['ratio']:.2f} ({ratio_ci}) | {r['val_bpb']:.4f} | {r['best_measured_bpb']:.4f} | {r['passes']:.2f} |")
 sensitive = [f'{float(b):.3g}' for b, status in budget_status.items() if status.get('sensitive')]
 if sensitive:
     card += ['', 'The fitted optimum is sensitive to a one-depth fitting-window shift (more than 10% change, or an invalid shifted fit) at FLOP budgets ' + ', '.join(sensitive) + '; regime exponents that include these budgets inherit this sensitivity.']
+if any(not np.isfinite(r['params_ci_low']) for r in optimal):
+    card += ['', 'Intervals are unresolved where too many bootstrap draws fail the fit; failed draws are not discarded from the confidence calculation.']
 invalid = [f'{float(b):.3g}: {s["reason"]}' for b, s in budget_status.items() if s['status'] == 'invalid']
 if invalid:
     card += ['', 'Invalid budgets excluded from fits: ' + '; '.join(invalid) + '.']

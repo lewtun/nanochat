@@ -70,3 +70,25 @@ def test_recovers_identifiable_data_constrained_law(tmp_path):
     assert result['standard_errors'] is not None
     assert result['bound_likelihood_ratios']['R_D_star'] > 3.84
     assert result['bound_likelihood_ratios']['R_N_star'] > 3.84
+    # The post-fit profile check must not declare unbounded repetition terms
+    # identified when the generating law has effectively no repetition penalty.
+    import numpy as np
+    rng = np.random.default_rng(17)
+    with path.open() as f:
+        records = list(csv.DictReader(f))
+    for row in records:
+        n = float(row['effective_params']) / 1e6
+        d = float(row['text_tokens_trained']) / 1e6
+        u = float(row['unique_tokens']) / 1e6
+        un = min(n, (alpha*A/(beta*B))**(1/alpha) * u**(beta/alpha))
+        rn, rd = n/un-1, d/u-1
+        ne = un * (1 + 10000 * (-math.expm1(-rn/10000)))
+        de = u * (1 + 10000 * (-math.expm1(-rd/10000)))
+        row['val_bpb'] = A/ne**alpha + B/de**beta + E + rng.normal(0, .005)
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(records)
+    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output)], check=True, timeout=60)
+    result = json.loads((output / 'fits.json').read_text())['data_constrained']
+    assert result['status'] == 'unidentified'
