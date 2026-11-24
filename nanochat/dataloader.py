@@ -64,7 +64,7 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
                 rg = pf.read_row_group(rg_idx)
                 batch = rg.column('text').to_pylist()
                 for i in range(0, len(batch), tokenizer_batch_size):
-                    yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx, epoch)
+                    yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx, epoch), i
                 rg_idx += ddp_world_size
             pq_idx += 1
         first_pass = False
@@ -75,7 +75,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     tokenizer, B, T, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
-    buffer_size=1000
+    buffer_size=1000, track_data_exposure=False
 ):
     """
     BOS-aligned dataloader with Best-Fit Cropping.
@@ -100,13 +100,16 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     bos_token = tokenizer.get_bos_token_id()
     doc_buffer = []
     pq_idx, rg_idx, epoch = 0, 0, 1
+    seen_prefixes = {}  # doc identity -> longest text prefix actually used
+    unique_text_tokens = 0
+    text_tokens = 0
 
     def refill_buffer():
         nonlocal pq_idx, rg_idx, epoch
-        doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
+        doc_batch, (pq_idx, rg_idx, epoch), offset = next(batches)
         token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-        for tokens in token_lists:
-            doc_buffer.append(tokens)
+        for index, tokens in enumerate(token_lists):
+            doc_buffer.append((tokens, (pq_idx, rg_idx, offset + index)) if track_data_exposure else tokens)
 
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
     # This gives us contiguous views and a single HtoD transfer
@@ -132,29 +135,44 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 # Find largest doc that fits entirely
                 best_idx = -1
                 best_len = 0
-                for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
+                for i, item in enumerate(doc_buffer):
+                    doc_len = len(item[0] if track_data_exposure else item)
                     if doc_len <= remaining and doc_len > best_len:
                         best_idx = i
                         best_len = doc_len
 
                 if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
+                    item = doc_buffer.pop(best_idx)
+                    doc, doc_id = item if track_data_exposure else (item, None)
                     doc_len = len(doc)
                     row_buffer[row_idx, pos:pos + doc_len] = torch.tensor(doc, dtype=torch.long)
                     pos += doc_len
                 else:
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
+                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i][0] if track_data_exposure else doc_buffer[i]))
+                    item = doc_buffer.pop(shortest_idx)
+                    doc, doc_id = item if track_data_exposure else (item, None)
                     row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
+                    doc_len = remaining
                     pos += remaining
+
+                if track_data_exposure:
+                    # Every document begins with BOS. The rest is a prefix of
+                    # the same document even on later epochs, so the maximum
+                    # observed prefix counts distinct corpus token positions.
+                    used = max(0, doc_len - 1)
+                    previous = seen_prefixes.get(doc_id, 0)
+                    unique_text_tokens += max(0, used - previous)
+                    seen_prefixes[doc_id] = max(previous, used)
+                    text_tokens += used
 
         # Copy to pinned CPU buffer, then single HtoD transfer
         cpu_inputs.copy_(row_buffer[:, :-1])
         cpu_targets.copy_(row_buffer[:, 1:])
 
         state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx, "epoch": epoch}
+        if track_data_exposure:
+            state_dict.update(unique_text_tokens=unique_text_tokens, text_tokens=text_tokens)
 
         # Single HtoD copy into persistent GPU buffer and yield
         gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)

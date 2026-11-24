@@ -24,7 +24,7 @@ NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
 read -r -a DEPTHS <<< "${DEPTHS:-10 12 14 16 18 20}"
 
-RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,tokens_trained,unique_tokens,passes,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
+RESULTS_HEADER="run_name,flops_budget,actual_flops,depth,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,effective_params,num_iterations,tokens_trained,text_tokens_trained,unique_tokens,passes,repeat_factor,val_bpb,core_score,throughput_tok_per_sec,mfu,train_time_sec"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -315,6 +315,10 @@ train_time = int(train_time_text)
 if any(value <= 0 for value in params) or num_iterations <= 0 or batch_size <= 0 or throughput <= 0 or train_time < 0:
     raise SystemExit(f"Invalid non-positive parsed metric in {log_path}")
 
+exposures = re.findall(r"Text exposure: unique_tokens=(\d+) text_tokens=(\d+)", text)
+unique_tokens, text_tokens = map(int, exposures[-1]) if exposures else (0, 0)
+if int(corpus_tokens_text) and not unique_tokens:
+    raise SystemExit("Missing measured training data exposure")
 row = [
     run_name,
     flops_budget,
@@ -325,8 +329,10 @@ row = [
     params[2] + params[3],
     num_iterations,
     num_iterations * batch_size,
-    min(num_iterations * batch_size, int(corpus_tokens_text)) if int(corpus_tokens_text) else "",
-    f"{num_iterations * batch_size / int(corpus_tokens_text):.12g}" if int(corpus_tokens_text) else "",
+    text_tokens if unique_tokens else "",
+    unique_tokens if unique_tokens else "",
+    f"{text_tokens / int(corpus_tokens_text):.12g}" if int(corpus_tokens_text) else "",
+    f"{text_tokens / unique_tokens:.12g}" if unique_tokens else "",
     f"{val_bpb:.12g}",
     f"{core_score:.12g}" if core_score is not None else "",
     throughput,
@@ -587,6 +593,9 @@ PYRATIO
         --save-every=-1
     )
 
+    if [[ "$DATA_PREFIX" != "base_data_climbmix" ]]; then
+        train_args+=(--track-data-exposure)
+    fi
     log "Starting $run_name with $NPROC_PER_NODE-process torchrun"
     start_time="$(date +%s)"
     set +e
