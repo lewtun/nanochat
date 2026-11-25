@@ -322,6 +322,10 @@ if args.diagnostics:
     if 'batch_comparison' in diagnostics:
         batch = diagnostics['batch_comparison']
         card += [f"At {batch['budget']:.3g} FLOPs and depth {batch['depth']}, an efficient batch changed BPB from {batch['baseline_bpb']:.6f} to {batch['comparison_bpb']:.6f}. This comparison also slightly changed total batch and optimizer scaling, so it does not isolate numerical rounding.", '']
+    if 'late_overfitting_examples' in diagnostics:
+        examples = diagnostics['late_overfitting_examples']
+        descriptions = ', '.join(f"depth {e['depth']}: {e['intermediate_min_bpb']:.4f} to {e['final_bpb']:.4f}" for e in examples['runs'])
+        card += [f"At {examples['budget']:.3g} FLOPs, some smaller models overfit late in training: intermediate minimum to final matched-validation BPB was {descriptions}. All scaling fits and model selection use final checkpoints, not these intermediate minima.", '']
 if regime_noise:
     card += [f"Bootstrap noise uses residual variance pooled separately across fresh and repeated regimes, with independent seed-derived floors; the resulting standard deviations are {regime_noise['fresh']:.4f} and {regime_noise['repeated']:.4f} BPB, respectively. These estimates assume noise is comparable within each regime.", '']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
