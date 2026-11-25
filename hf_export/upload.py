@@ -56,8 +56,12 @@ def main():
             standard = (path.name.startswith('model') and (path.name.endswith('.safetensors') or path.name.endswith('.safetensors.index.json'))) or path.name.startswith('tokenizer') or path.name in ('special_tokens_map.json', 'added_tokens.json', 'generation_config.json') or path.suffix in ('.pt', '.pkl')
             if (top_level and standard) or relative.startswith('assets/'):
                 stale.append(glob.escape(relative))
+    # The released card is hand-edited; later weight exports must not replace it.
+    ignore = ['*.pt', '*.pkl']
+    if prefix + 'README.md' in remote:
+        ignore.append('README.md')
     api.upload_folder(repo_id=args.repo_id, repo_type='model', folder_path=str(folder), path_in_repo=subfolder,
-                      ignore_patterns=['*.pt', '*.pkl'], delete_patterns=stale or None)
+                      ignore_patterns=ignore, delete_patterns=stale or None)
 
 
 if __name__ == '__main__':

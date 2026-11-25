@@ -258,7 +258,7 @@ def test_upload_guard(tmp_path, monkeypatch):
     local = tmp_path / 'local'; local.mkdir()
     for name in ('config.json', 'tokenizer.json', 'model.safetensors', 'configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'):
         (local / name).write_text('test')
-    remote = {'configuration_rh_nanochat.py': 'test', 'modeling_rh_nanochat.py': 'test',
+    remote = {'configuration_rh_nanochat.py': 'test', 'modeling_rh_nanochat.py': 'test', 'README.md': 'hand-edited', 'runA/README.md': 'hand-edited subfolder',
               'runA/config.json': 'old', 'runA/model.safetensors': 'weights',
               'runB/config.json': 'old', 'runB/model.safetensors': 'weights',
               'model.safetensors': 'old', 'assets/old.png': 'old'}
@@ -291,10 +291,12 @@ def test_upload_guard(tmp_path, monkeypatch):
     assert len(calls) == 1 and calls[-1]['path_in_repo'] == 'runA'
     assert calls[-1]['delete_patterns'] == ['model.safetensors']
     assert '*.pt' in calls[-1]['ignore_patterns']
+    assert 'README.md' in calls[-1]['ignore_patterns']
     calls.clear()
     monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
     upload.main()
     patterns = calls[-1]['delete_patterns']
+    assert 'README.md' in calls[-1]['ignore_patterns']
     deleted = {key for key in remote if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)}
     assert deleted == {'model.safetensors', 'assets/old.png'}
     assert 'runA/model.safetensors' not in deleted and 'runB/model.safetensors' not in deleted
