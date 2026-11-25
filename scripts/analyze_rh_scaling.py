@@ -336,7 +336,7 @@ fig.savefig(plot_dir / 'scaling.png')
 plt.close(fig)
 
 headline_range = f"{min(r['flops'] for r in headline):.3g}–{max(r['flops'] for r in headline):.3g}" if headline else 'no valid headline budgets'
-card = ['## Scaling-law results', '', f'The headline sweep covers {headline_range} training FLOPs. Effective parameters are transformer matrices plus the language-model head. IsoFLOP curves use final-checkpoint matched-validation bits per byte; dashed quadratics fit the observed minimum and two neighbors on each side, and stars mark fitted minima.', '', '![Scaling laws](assets/scaling.png)', '']
+card = ['## Scaling-law results', '', f'The headline sweep covers {headline_range} training FLOPs. Effective parameters are transformer matrices plus the language-model head. IsoFLOP curves use final-checkpoint matched-validation bits per byte; dashed quadratics fit the observed minimum and two neighbors on each side. Headline stars mark fitted minima; the red star marks the selected run.', '', '![Scaling laws](assets/scaling.png)', '']
 hf = fits.get('headline', {})
 if 'params_exponent' in hf:
     ni, di = hf.get('conditional_params_exponent_ci'), hf.get('conditional_tokens_exponent_ci')

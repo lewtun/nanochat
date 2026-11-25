@@ -57,6 +57,7 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     assert selection['params_total'] == 5001000
     assert selection['fitted_optimum_params'] < 4.5e6
     assert 'window_shift_fraction' in selection
+    assert status[str(1e17)]['shifts_evaluated'] == 1
 
     card = (output / 'model_card_results.md').read_text()
     assert '100 documents and 1,000 text tokens' in card
