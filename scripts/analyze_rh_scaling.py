@@ -309,7 +309,7 @@ card=['## Scaling-law results','','We trained on the Lean corpus with held-out s
 card += [f"The selected checkpoint is depth {selection['depth']} at {selection['budget']:.3g} training FLOPs, the tested model closest in log parameter count to the fitted optimum at the largest valid budget. Its final-checkpoint matched-validation loss is {selection['final_validation_bpb']:.4f} bits per byte.", '']
 if any('rh-c-a100' in row['run_name'] for row in rows):
     card += ['The sweep includes A100 and H200 runs. A100 runs use smaller device microbatches and may use a different attention backend. Gradient accumulation and hardware can introduce numerical differences, and no matched cross-hardware noise estimate is available.', '']
-if any('rh-c-a100x4-' in row['run_name'] for row in rows):
+if any('rh-c-a100x4-' in row['run_name'] or 'rh-c-h200x4-' in row['run_name'] for row in rows):
     card += ['Four-GPU runs were included only where the automatically selected total batch matched the eight-GPU setting. Rank count changes data ordering and optimizer-state sharding as well as numerical rounding, so these runs are not exact replicas.', '']
 if manifest.get('train') and manifest.get('validation'):
     train, val = manifest['train'], manifest['validation']
