@@ -307,6 +307,8 @@ if args.area_dir:
 card=['## Scaling-law results','','We trained on the Lean corpus with held-out source directories. The figures report validation bits per byte, training compute and effective parameters (transformer matrices plus the language-model head).','',
       '![IsoFLOP curves](assets/isoflop.png)','','![Best loss against compute](assets/best_loss.png)','','![Optimal model size and training tokens](assets/optimal_nd.png)','','![Optimal tokens per parameter](assets/tokens_per_param.png)','']
 card += [f"The selected checkpoint is depth {selection['depth']} at {selection['budget']:.3g} training FLOPs, the tested model closest in log parameter count to the fitted optimum at the largest valid budget. Its final-checkpoint matched-validation loss is {selection['final_validation_bpb']:.4f} bits per byte.", '']
+if any('rh-c-a100-' in row['run_name'] for row in rows):
+    card += ['The sweep includes A100x8 and H200x8 runs. They use the same world size, total-batch rule and optimizer scales; A100 runs use smaller device microbatches and may use a different attention backend. Gradient accumulation and hardware can introduce numerical differences, and no matched cross-hardware noise estimate is available.', '']
 if manifest.get('train') and manifest.get('validation'):
     train, val = manifest['train'], manifest['validation']
     card += [f"The training split contains {train['files']:,} documents and {train['tokens']:,} text tokens. Matched validation contains {val['files']:,} documents. The train–validation area distribution has total-variation distance {manifest['train_validation_area_tv']:.3f}.", '']
