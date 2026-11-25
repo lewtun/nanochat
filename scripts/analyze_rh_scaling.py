@@ -316,7 +316,7 @@ for budget in sorted({r['flops_budget'] for r in rows if r['flops_budget'] <= ar
         ax.plot(10**xx, np.polyval([opt['quadratic_a'], opt['quadratic_b'], opt['quadratic_c']], xx), '--', color=line.get_color())
         ax.plot(opt['effective_params'], opt['val_bpb'], '*', color=line.get_color(), markersize=10)
 ax.plot(selected['effective_params'], selected['val_bpb'], '*', color='#d62728', markeredgecolor='white', markeredgewidth=.7, markersize=16, zorder=5)
-ax.annotate('riemann-nano', (selected['effective_params'], selected['val_bpb']), xytext=(12, -18), textcoords='offset points', color='#b21f2d', fontsize=9)
+ax.annotate('riemann-nano', (selected['effective_params'], selected['val_bpb']), xytext=(12, 12), textcoords='offset points', color='#b21f2d', fontsize=9)
 ax.set(xscale='log', xlabel='Effective parameters', ylabel='Final validation bits per byte', title='IsoFLOP curves')
 ax.legend(fontsize=7, loc='upper right')
 if headline:
