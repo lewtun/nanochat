@@ -52,9 +52,11 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     assert fits['data_constrained']['status'] != 'fit'
     selection = json.loads((output / 'selected_model.json').read_text())
     assert selection['budget'] == 1e17
-    assert selection['depth'] == 5
-    assert selection['final_validation_bpb'] == pytest.approx(.48)
-    assert selection['params_total'] == 5001000
+    assert selection['depth'] == 4
+    assert selection['final_validation_bpb'] == pytest.approx(.5)
+    assert selection['params_total'] == 4001000
+    assert not selection['is_best_measured']
+    assert selection['best_measured_depth'] == 5
     assert selection['fitted_optimum_params'] < 4.5e6
     assert 'window_shift_fraction' in selection
     assert status[str(1e17)]['shifts_evaluated'] == 1

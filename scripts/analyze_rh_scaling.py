@@ -171,9 +171,13 @@ if not optimal:
     raise SystemExit('No valid budget fits; see budget_status.json and extend the depth grid')
 with (args.output_dir/'optimal.csv').open('w',newline='') as f:
     writer = csv.DictWriter(f,fieldnames=list(optimal[0])); writer.writeheader(); writer.writerows(optimal)
-largest = max(optimal, key=lambda r: r['flops'])
-selected = min((r for r in rows if r['flops_budget'] == largest['flops']),
-               key=lambda r: (r['val_bpb'], r['effective_params']))
+headline = [r for r in optimal if r['flops'] <= args.headline_max_flops]
+if not headline:
+    raise SystemExit('No valid headline budget fits; see budget_status.json and extend the depth grid')
+largest = max(headline, key=lambda r: r['flops'])
+budget_rows = [r for r in rows if r['flops_budget'] == largest['flops']]
+selected = min(budget_rows, key=lambda r: (abs(np.log(r['effective_params'] / largest['effective_params'])), r['effective_params']))
+best_measured = min(budget_rows, key=lambda r: (r['val_bpb'], r['effective_params']))
 selection = {'budget': largest['flops'], 'depth': selected['depth'], 'run_name': selected['run_name'],
              'effective_params': selected['effective_params'], 'params_total': selected['params_total'],
              'fitted_optimum_params': largest['effective_params'],
@@ -181,10 +185,12 @@ selection = {'budget': largest['flops'], 'depth': selected['depth'], 'run_name':
              'window_sensitive': budget_status[str(largest['flops'])]['sensitive'],
              'window_shift_invalid': budget_status[str(largest['flops'])]['invalid_shift'],
              'final_validation_bpb': selected['val_bpb'],
-             'selection_rule': 'lowest final matched-validation BPB at the largest valid budget'}
+             'is_best_measured': selected['val_bpb'] == best_measured['val_bpb'],
+             'best_measured_depth': best_measured['depth'],
+             'best_measured_bpb': best_measured['val_bpb'],
+             'selection_rule': 'tested checkpoint nearest the fitted optimum at the largest valid headline budget'}
 (args.output_dir/'selected_model.json').write_text(json.dumps(selection, indent=2) + '\n')
 fits = {}
-headline = [r for r in optimal if r['flops'] <= args.headline_max_flops]
 for filename, group in [('optimal_headline.csv', headline), ('optimal_beyond.csv', [r for r in optimal if r['flops'] > args.headline_max_flops])]:
     if group:
         with (args.output_dir/filename).open('w', newline='') as f:
@@ -308,15 +314,8 @@ for budget in sorted({r['flops_budget'] for r in rows if r['flops_budget'] <= ar
         xx = np.linspace(np.log10(opt['fit_min_params']), np.log10(opt['fit_max_params']), 120)
         ax.plot(10**xx, np.polyval([opt['quadratic_a'], opt['quadratic_b'], opt['quadratic_c']], xx), '--', color=line.get_color())
         ax.plot(opt['effective_params'], opt['val_bpb'], '*', color=line.get_color(), markersize=10)
-if selected['flops_budget'] > args.headline_max_flops:
-    group = sorted((r for r in rows if r['flops_budget'] == selected['flops_budget']), key=lambda r: r['effective_params'])
-    best_idx = next(i for i, r in enumerate(group) if r['run_name'] == selected['run_name'])
-    local = group[max(0, best_idx-4):best_idx+5]
-    ax.plot([r['effective_params'] for r in local], [r['val_bpb'] for r in local], 'o', color='#202020', markersize=4, label=f"{selected['flops_budget']:.3g} FLOPs (local)")
-    xx = np.linspace(np.log10(largest['fit_min_params']), np.log10(largest['fit_max_params']), 120)
-    ax.plot(10**xx, np.polyval([largest['quadratic_a'], largest['quadratic_b'], largest['quadratic_c']], xx), '--', color='#202020')
-    ax.plot(selected['effective_params'], selected['val_bpb'], '*', color='#d62728', markersize=15, zorder=5)
-    ax.annotate('riemann-nano', (selected['effective_params'], selected['val_bpb']), xytext=(-14, 17), textcoords='offset points', ha='right', color='#b21f2d', fontsize=9)
+ax.plot(selected['effective_params'], selected['val_bpb'], '*', color='#d62728', markeredgecolor='white', markeredgewidth=.7, markersize=16, zorder=5)
+ax.annotate('riemann-nano', (selected['effective_params'], selected['val_bpb']), xytext=(12, -18), textcoords='offset points', color='#b21f2d', fontsize=9)
 ax.set(xscale='log', xlabel='Effective parameters', ylabel='Final validation bits per byte', title='IsoFLOP curves')
 ax.legend(fontsize=7, loc='upper right')
 if headline:
@@ -324,12 +323,10 @@ if headline:
     nx.loglog(hx, hy, 'o', color='#2878b5', label='Fitted optima')
     fit = fits.get('headline', {})
     if 'params_exponent' in fit:
-        xx = np.geomspace(hx.min(), max(hx.max(), selected['flops_budget']), 160)
+        xx = np.geomspace(hx.min(), hx.max(), 160)
         nx.loglog(xx, fit['params_coefficient']*xx**fit['params_exponent'], '--', color='#2878b5', label=f"N ∝ C^{fit['params_exponent']:.2f}")
-    if selected['flops_budget'] > args.headline_max_flops:
-        nx.loglog(selected['flops_budget'], selected['effective_params'], '*', color='#d62728', markersize=15)
-        nx.annotate(f"riemann-nano\n{selected['effective_params']/1e6:.0f}M", (selected['flops_budget'], selected['effective_params']), xytext=(-12, 11), textcoords='offset points', ha='right', color='#b21f2d', fontsize=9)
-        nx.text(.58, .12, 'Repeated data favors a larger model\nthan the headline extrapolation', transform=nx.transAxes, fontsize=8)
+    nx.loglog(selected['flops_budget'], selected['effective_params'], '*', color='#d62728', markeredgecolor='white', markeredgewidth=.7, markersize=16, zorder=5)
+    nx.annotate(f"riemann-nano\n{selected['effective_params']/1e6:.1f}M", (selected['flops_budget'], selected['effective_params']), xytext=(-10, 12), textcoords='offset points', ha='right', color='#b21f2d', fontsize=9)
 nx.set(xlabel='Training FLOPs', ylabel='Effective parameters', title='Optimal model size')
 nx.legend(fontsize=8, loc='upper left')
 fig.savefig(plot_dir / 'scaling.png')
@@ -348,35 +345,21 @@ for r in headline:
     n_ci = f"{r['params_ci_low']:,.0f}–{r['params_ci_high']:,.0f}" if np.isfinite(r['params_ci_low']) else 'unresolved'
     ratio_ci = f"{r['ratio_ci_low']:.2f}–{r['ratio_ci_high']:.2f}" if np.isfinite(r['ratio_ci_low']) else 'unresolved'
     card.append(f"| {r['flops']:.3g} | {r['effective_params']:,.0f} ({n_ci}) | {r['tokens']:,.0f} | {r['ratio']:.2f} ({ratio_ci}) | {r['val_bpb']:.4f} | {r['best_measured_bpb']:.4f} | {r['passes']:.2f} |")
-card += ['', '## Beyond the data', '']
-beyond = [r for r in optimal if r['flops'] > args.headline_max_flops]
-if beyond:
-    text = f"At {min(r['flops'] for r in beyond):.3g}–{max(r['flops'] for r in beyond):.3g} FLOPs, fitted optimal training exposure ranges from {min(r['passes'] for r in beyond):.2f} to {max(r['passes'] for r in beyond):.2f} passes over the corpus."
-    if {2.15e18, 3e18}.issubset({r['flops'] for r in beyond}):
-        text += ' Late-run overfitting contributes to the rise and second dip in the 2.15e18 and 3e18 final-checkpoint curves; the local fitted optima are sensitive to the selected window.'
-    card += [text, '']
-repeat = fits['repeated']
-if 'params_exponent' in repeat:
-    repeated_budgets = [r['flops'] for r in optimal if r['passes'] > 1]
-    card += [f"Across the repeated-data budgets ({min(repeated_budgets):.3g}–{max(repeated_budgets):.3g} FLOPs), N ∝ C^{repeat['params_exponent']:.3f} and D ∝ C^{repeat['tokens_exponent']:.3f}. This is a descriptive fit across the repeated regime.", '']
 if args.diagnostics:
     diagnostics = json.loads(args.diagnostics.read_text())
-    if 'beyond_overfitting' in diagnostics:
-        example = diagnostics['beyond_overfitting']
-        card += [f"Late-run overfitting is visible at {example['budget']:.3g} FLOPs and depth {example['depth']}: matched BPB reached {example['intermediate_min_bpb']:.6f} during training and ended at {example['final_bpb']:.6f}. All fits and selection use final checkpoints.", '']
 total_text = f" and {selection['params_total']:,} total parameters" if selection['params_total'] is not None else ''
-card += [f"riemann-nano is the best-measured model at the largest compute budget ({selection['budget']:.3g} FLOPs), depth {selection['depth']}. It has {selection['effective_params']:,.0f} effective parameters{total_text}, and final matched-validation BPB {selection['final_validation_bpb']:.6f}. The fitted optimum is {selection['fitted_optimum_params']:,.0f} effective parameters; shifting the fitting window changes it by up to {100*selection['window_shift_fraction']:.1f}%.", '', '## Limitations', '']
+best_text = ' It is also the best-measured run at that budget.' if selection['is_best_measured'] else f" The best-measured run at that budget is depth {selection['best_measured_depth']} (BPB {selection['best_measured_bpb']:.6f})."
+card += [f"riemann-nano is depth {selection['depth']}, the tested checkpoint nearest the fitted optimum at the largest headline budget ({selection['budget']:.3g} FLOPs). It has {selection['effective_params']:,.0f} effective parameters{total_text}, and final matched-validation BPB {selection['final_validation_bpb']:.6f}.{best_text} The fitted optimum is {selection['fitted_optimum_params']:,.0f} effective parameters; shifting the fitting window changes it by up to {100*selection['window_shift_fraction']:.1f}%.", '', '## Limitations', '']
+if any(r['flops'] > args.headline_max_flops for r in optimal):
+    card += ['Larger budgets (1e18–3e18 FLOPs) were also explored; the corpus repeats and their optima depart from the headline scaling law. Those runs are not part of this release.', '']
 if manifest.get('train') and manifest.get('validation'):
     train, val = manifest['train'], manifest['validation']
     card += [f"The training split contains {train['files']:,} documents and {train['tokens']:,} text tokens. Matched validation contains {val['files']:,} documents. The train–validation area distribution has total-variation distance {manifest['train_validation_area_tv']:.3f}. In leaf-sampled areas, matched validation never samples non-leaf files or leaves larger than about 6% of their area; these account for approximately 61% of matched-area bytes. The effect on validation BPB is unmeasured. The three designated file-level areas are exceptions.", '']
 if args.diagnostics:
     seed = diagnostics['seed_comparison']
     card += [f"{len(seed['depths'])} paired runs at {seed['budget']:.3g} FLOPs estimate {seed['noise_sigma_bpb']:.4f} BPB single-run initialization noise, with data order held fixed. Fitting-window sensitivity and failed bootstrap fits add uncertainty beyond the conditional intervals above.", '']
-    if 'repeated_seed_comparison' in diagnostics:
-        repeat_seed=diagnostics['repeated_seed_comparison']
-        card += [f"{len(repeat_seed['depths'])} paired runs at {repeat_seed['budget']:.3g} FLOPs estimate {repeat_seed['noise_sigma_bpb']:.6f} BPB noise, also with fixed data order.", '']
 if regime_noise:
-    card += [f"Bootstrap noise uses the larger of seed noise and pooled local-fit residuals: {regime_noise['fresh']:.6f} BPB for the fresh regime and {regime_noise['repeated']:.6f} BPB for the repeated regime.", '']
+    card += [f"Bootstrap noise uses the larger of seed noise and pooled local-fit residuals: {regime_noise['fresh']:.6f} BPB for the fresh regime and {regime_noise['repeated']:.6f} BPB for repeated-data points.", '']
 elif args.repeated_noise_sigma is not None:
     card += [f"Fewer than three budgets in a regime prevented separate noise pooling; the bootstrap used pooled noise {noise_sigma:.4f} BPB and did not use the repeated-data floor.", '']
     print('Warning: fewer than three valid budgets in a regime; repeated-data noise floor was not used')
@@ -384,14 +367,14 @@ if args.diagnostics and 'weight_decay_comparison' in diagnostics:
     decay = diagnostics['weight_decay_comparison']
     card += [f"Reducing reference weight decay from {decay['baseline_reference_decay']:.2f} to {decay['comparison_reference_decay']:.2f} worsened the checked losses by {min(decay['bpb_differences']):.3f}–{max(decay['bpb_differences']):.3f} BPB.", '']
 status = fits['data_constrained']['status']
-sens = [f'{float(b):.3g}' for b, s in budget_status.items() if s.get('sensitive')]
+sens = [f'{float(b):.3g}' for b, s in budget_status.items() if float(b) <= args.headline_max_flops and s.get('sensitive')]
 if sens:
     card += ['Fitting-window sensitivity was detected at FLOP budgets ' + ', '.join(sens) + '.', '']
 invalid = [f'{float(b):.3g}: {s["reason"]}' for b, s in budget_status.items() if s['status'] == 'invalid']
 if invalid:
     card += ['Invalid budgets excluded from fits: ' + '; '.join(invalid) + '.', '']
-card += [('The data-constrained seven-constant fit is unidentified; its constants should not be treated as established.' if status == 'unidentified' else f'The data-constrained seven-constant fit status is {status}.'), '', 'All scaling rows were trained on H200 GPUs. Node sizes by compute budget:', '']
-for budget in sorted({row['flops_budget'] for row in rows}):
+card += ['All headline scaling rows were trained on H200 GPUs. Node sizes by compute budget:', '']
+for budget in sorted({row['flops_budget'] for row in rows if row['flops_budget'] <= args.headline_max_flops}):
     counts = {row['nproc_per_node'] for row in rows if row['flops_budget'] == budget}
     sizes = ', '.join('unrecorded' if n is None else ('h200' if n == 1 else f'h200x{n}') for n in sorted(counts, key=lambda n: n or 0))
     card.append(f"- {budget:.3g} FLOPs: {sizes}")
