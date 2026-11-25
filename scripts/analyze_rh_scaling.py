@@ -330,6 +330,9 @@ if args.diagnostics:
         examples = diagnostics['late_overfitting_examples']
         descriptions = ', '.join(f"depth {e['depth']}: {e['intermediate_min_bpb']:.4f} to {e['final_bpb']:.4f}" for e in examples['runs'])
         card += [f"At {examples['budget']:.3g} FLOPs, some smaller models overfit late in training: intermediate minimum to final matched-validation BPB was {descriptions}. All scaling fits and model selection use final checkpoints, not these intermediate minima.", '']
+    if 'cross_hardware_intermediate' in diagnostics:
+        comparison = diagnostics['cross_hardware_intermediate']
+        card += [f"At {comparison['budget']:.3g} FLOPs, depth {comparison['depth']} and step {comparison['step']}, intermediate matched-validation BPB was {comparison['h200_bpb']:.6f} on H200x4 and {comparison['a100_bpb']:.6f} on A100x4. These runs also differ in microbatch size and potentially data ordering and attention backend; the intermediate difference is not a final-checkpoint estimate of hardware noise.", '']
 if regime_noise:
     card += [f"Bootstrap noise uses residual variance pooled separately across fresh and repeated regimes, with independent seed-derived floors; the resulting standard deviations are {regime_noise['fresh']:.4f} and {regime_noise['repeated']:.4f} BPB, respectively. These estimates assume noise is comparable within each regime.", '']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
