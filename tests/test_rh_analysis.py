@@ -6,6 +6,21 @@ import sys
 import pytest
 
 
+def test_a100_comparison_requires_explicit_fallback(tmp_path):
+    manifest = {'document_eos': True, 'asset_prefix': 'rh', 'tokenizer_sha256': 'abc', 'tokenizer_bucket_path': 'bucket/tokenizer'}
+    manifest_path = tmp_path / 'manifest.json'
+    manifest_path.write_text(json.dumps(manifest))
+    row = dict(run_name='scaling_rh-c-a100x4-1e19-d33_1e19_d33', asset_prefix='rh', head_dim=64, document_eos=1, tokenizer_sha256='abc', tokenizer_bucket_path='bucket/tokenizer', batch_lr_scale=.3, weight_decay_scaled=.2, validation_mode='full_documents', model_dim=2112, depth=33, num_iterations=500, flops_budget=1e19)
+    path = tmp_path / 'a100.csv'
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        writer.writeheader()
+        writer.writerow(row)
+    result = subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(tmp_path / 'out')], capture_output=True, text=True, timeout=60)
+    assert result.returncode != 0
+    assert 'A100 comparison row' in result.stderr
+
+
 def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     manifest = {'document_eos': True, 'asset_prefix': 'rh', 'tokenizer_sha256': 'abc', 'tokenizer_bucket_path': 'bucket/tokenizer', 'train': {'files': 100, 'tokens': 1000}, 'validation': {'files': 10}, 'train_validation_area_tv': .03}
     manifest_path = tmp_path / 'manifest.json'

@@ -26,6 +26,7 @@ parser.add_argument('--head-dim', type=int, default=64)
 parser.add_argument('--noise-sigma', type=float, default=0, help='independently measured BPB noise floor (pooled with residual estimate conservatively)')
 parser.add_argument('--repeated-noise-sigma', type=float, help='independent repeated-data noise floor; pool residual variance separately by regime')
 parser.add_argument('--diagnostics', type=Path, help='JSON with controlled seed and optimizer comparisons for the model card')
+parser.add_argument('--allow-a100-fallback', action='store_true', help='allow explicitly identified A100 rows when the corresponding Hopper run failed')
 args = parser.parse_args()
 if not np.isfinite(args.noise_sigma) or args.noise_sigma < 0:
     parser.error('--noise-sigma must be finite and nonnegative')
@@ -53,6 +54,8 @@ for path in args.results:
                 raise ValueError(f'{path}: incompatible model width or fewer than 500 optimizer steps')
             point = (float(r['flops_budget']), int(r['depth']))
             name = r.get('run_name') or f'{path}:depth={r["depth"]}'
+            if 'rh-c-a100' in name and not args.allow_a100_fallback:
+                raise ValueError(f'{path}: A100 comparison row {name} is excluded from the Hopper grid; explicitly allow a documented fallback if its Hopper run failed')
             if point in seen_points:
                 raise ValueError(f'Duplicate budget/depth {point}: {seen_points[point]} and {name}')
             seen_points[point] = name
@@ -308,7 +311,7 @@ card=['## Scaling-law results','','We trained on the Lean corpus with held-out s
       '![IsoFLOP curves](assets/isoflop.png)','','![Best loss against compute](assets/best_loss.png)','','![Optimal model size and training tokens](assets/optimal_nd.png)','','![Optimal tokens per parameter](assets/tokens_per_param.png)','']
 card += [f"The selected checkpoint is depth {selection['depth']} at {selection['budget']:.3g} training FLOPs, the tested model closest in log parameter count to the fitted optimum at the largest valid budget. Its final-checkpoint matched-validation loss is {selection['final_validation_bpb']:.4f} bits per byte.", '']
 if any('rh-c-a100' in row['run_name'] for row in rows):
-    card += ['The sweep includes A100 and H200 runs. A100 runs use smaller device microbatches and may use a different attention backend. Gradient accumulation and hardware can introduce numerical differences, and no matched cross-hardware noise estimate is available.', '']
+    card += ['The sweep includes explicitly selected A100 fallback rows after corresponding Hopper failures. A100 runs use smaller device microbatches and may use a different attention backend. Gradient accumulation and hardware can introduce numerical differences.', '']
 if any('rh-c-a100x4-' in row['run_name'] or 'rh-c-h200x4-' in row['run_name'] for row in rows):
     card += ['Four-GPU runs were included only where the automatically selected total batch matched the eight-GPU setting. Rank count changes data ordering and optimizer-state sharding as well as numerical rounding, so these runs are not exact replicas.', '']
 if manifest.get('train') and manifest.get('validation'):
@@ -333,6 +336,10 @@ if args.diagnostics:
     if 'cross_hardware_intermediate' in diagnostics:
         comparison = diagnostics['cross_hardware_intermediate']
         card += [f"At {comparison['budget']:.3g} FLOPs, depth {comparison['depth']} and step {comparison['step']}, intermediate matched-validation BPB was {comparison['h200_bpb']:.6f} on H200x4 and {comparison['a100_bpb']:.6f} on A100x4. These runs also differ in microbatch size and potentially data ordering and attention backend; the intermediate difference is not a final-checkpoint estimate of hardware noise.", '']
+    if 'cross_hardware_final' in diagnostics:
+        comparison = diagnostics['cross_hardware_final']
+        descriptions = ', '.join(f"depth {e['depth']}: H200 {e['h200_bpb']:.6f}, A100 {e['a100_bpb']:.6f}" for e in comparison['runs'])
+        card += [f"At {comparison['budget']:.3g} FLOPs, final-checkpoint cross-flavor comparisons gave {descriptions} BPB. These comparisons also change microbatch size and potentially data ordering and attention backend.", '']
 if regime_noise:
     card += [f"Bootstrap noise uses residual variance pooled separately across fresh and repeated regimes, with independent seed-derived floors; the resulting standard deviations are {regime_noise['fresh']:.4f} and {regime_noise['repeated']:.4f} BPB, respectively. These estimates assume noise is comparable within each regime.", '']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
