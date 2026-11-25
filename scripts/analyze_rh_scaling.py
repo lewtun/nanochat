@@ -332,7 +332,7 @@ for regime in ('fresh','repeated'):
         intervals = ''
         if 'params_exponent_ci' in fit:
             ni, di = fit['params_exponent_ci'], fit['tokens_exponent_ci']
-            intervals = f" Noise-only bootstrap 95% intervals are [{ni[0]:.3f}, {ni[1]:.3f}] and [{di[0]:.3f}, {di[1]:.3f}], respectively; they exclude uncertainty from the fitting-window choice."
+            intervals = f" Noise-only bootstrap 95% intervals are [{ni[0]:.3f}, {ni[1]:.3f}] and [{di[0]:.3f}, {di[1]:.3f}], respectively; they exclude uncertainty from the fitting-window choice and the scaling-law model."
         card += [f"For {regime} data, the fitted exponents are N ∝ C^{fit['params_exponent']:.3f} and D ∝ C^{fit['tokens_exponent']:.3f}." + intervals, '']
 card += ['', 'Regime labels use interpolated passes at the optimum; individual models in a fit window can fall on the other side of one pass.', '']
 card += ['| FLOPs | Effective parameters (noise-only 95% CI) | Training tokens | Tokens/parameter (noise-only 95% CI) | Fitted BPB | Best measured BPB | Passes |','| ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
