@@ -715,9 +715,6 @@ PYSTEPS
     else
         device_batch=32
     fi
-    if (( DEVICE_BATCH_LIMIT > 0 && DEVICE_BATCH_LIMIT < device_batch )); then
-        device_batch="$DEVICE_BATCH_LIMIT"
-    fi
 
     horizon_args=(--target-flops="$flops_budget" --target-param-data-ratio=-1)
     train_args=(
@@ -736,6 +733,9 @@ PYSTEPS
     fi
     if [[ "$EFFICIENT_BATCH" == 0 ]]; then
         train_args+=(--no-efficient-batch)
+    fi
+    if (( DEVICE_BATCH_LIMIT > 0 )); then
+        train_args+=(--microbatch-cap="$DEVICE_BATCH_LIMIT")
     fi
     log "Starting $run_name with $NPROC_PER_NODE-process torchrun"
     start_time="$(date +%s)"

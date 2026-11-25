@@ -66,3 +66,13 @@ def test_efficient_batch_uses_best_fallback_when_no_large_divisor_exists():
     total, device = efficient_auto_batch(23 * unit, 2048, 8, 8)
     assert total == 22 * unit
     assert device == 2
+
+
+def test_memory_cap_keeps_the_selected_distributed_batch():
+    unit = 2048 * 8
+    total, original_device = efficient_auto_batch(34 * unit, 2048, 8, 8)
+    limited_device = compatible_device_batch(total, 2048, 8, 4)
+    assert total == 32 * unit
+    assert original_device == 8
+    assert limited_device == 4
+    assert total // (unit * limited_device) == 8

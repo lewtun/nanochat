@@ -66,6 +66,7 @@ parser.add_argument("--tokenizer-bucket-path", default="", help="bucket URI of t
 parser.add_argument("--document-eos", action="store_true", help="encode complete documents with BOS and EOS")
 parser.add_argument("--track-data-exposure", action="store_true", help="count distinct text token positions seen; unsupported with resume")
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
+parser.add_argument("--microbatch-cap", type=int, default=0, help="cap the device microbatch after selecting the automatic total batch (0 disables)")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
 parser.add_argument("--min-steps", type=int, default=0, help="cap automatic batch to target at least this many FLOP-budget optimizer steps (0 disables)")
 parser.add_argument("--no-efficient-batch", action="store_true", help="retain historical automatic batch rounding for controlled comparisons")
@@ -92,6 +93,10 @@ if args.feasibility_steps < 0:
     parser.error("--feasibility-steps must be non-negative")
 if args.feasibility_steps and (args.resume_from_step >= 0 or args.target_flops <= 0 or args.num_iterations > 0):
     parser.error("--feasibility-steps requires a fresh FLOP-budget run")
+if args.microbatch_cap < 0:
+    parser.error("--microbatch-cap must be non-negative")
+if args.microbatch_cap and args.total_batch_size != -1:
+    parser.error("--microbatch-cap requires an automatic total batch")
 if args.min_steps < 0:
     parser.error("--min-steps must be non-negative")
 if args.min_steps and (args.total_batch_size != -1 or args.target_flops <= 0 or args.num_iterations > 0):
@@ -334,6 +339,8 @@ if total_batch_size == -1:
             print0(f"Adjusted automatic batch for efficient microbatches: {original_batch:,} -> {total_batch_size:,} tokens")
     else:
         device_batch = compatible_device_batch(total_batch_size, args.max_seq_len, ddp_world_size, args.device_batch_size)
+    if args.microbatch_cap:
+        device_batch = compatible_device_batch(total_batch_size, args.max_seq_len, ddp_world_size, min(device_batch, args.microbatch_cap))
     if device_batch != args.device_batch_size:
         print0(f"Reducing device batch size from {args.device_batch_size} to {device_batch} to fit the automatic total batch")
         args.device_batch_size = device_batch
