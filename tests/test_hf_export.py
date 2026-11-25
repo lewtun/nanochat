@@ -92,13 +92,16 @@ def test_convert_roundtrip(tmp_path):
     tokenizer.save(tokdir)
     orig, _ = models(2)
     torch.save(orig.state_dict(), ckpt / 'model_000001.pt')
-    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(orig.config), 'tokenizer_sha256': hashlib.sha256((tokdir / 'tokenizer.pkl').read_bytes()).hexdigest()}))
+    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(orig.config), 'tokenizer_sha256': hashlib.sha256((tokdir / 'tokenizer.pkl').read_bytes()).hexdigest(), 'user_config': {'run': 'test-run'}, 'val_bpb': .5}))
     plots = tmp_path / 'plots'
     plots.mkdir()
     (plots / 'isoflop.png').write_bytes(b'example plot')
     results = tmp_path / 'results.md'
     results.write_text('## Scaling-law results\n\n![isoFLOP](assets/isoflop.png)\n\n| N | D |\n|---|---|\n| 1 | 2 |\n')
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .5}))
     convert(ckpt, tokdir, out, results_markdown=results, assets_dir=plots)
+    assert 'license: apache-2.0' in (out / 'README.md').read_text()
+    assert 'license terms have not been established' not in (out / 'README.md').read_text()
     assert '![isoFLOP](assets/isoflop.png)' in (out / 'README.md').read_text()
     assert (out / 'assets/isoflop.png').read_bytes() == b'example plot'
     assert all((out / name).exists() for name in ("model.safetensors", "config.json", "generation_config.json", "tokenizer.json", "README.md"))
@@ -249,14 +252,17 @@ def test_prompt_lookup_and_cache_crop():
     torch.testing.assert_close(result, model(fresh, use_cache=False).logits[:, -1:], atol=2e-6, rtol=2e-5)
 
 
-def test_upload_guard(tmp_path, monkeypatch):
+def test_upload_guard(tmp_path, monkeypatch, capsys):
     import fnmatch
     import hf_export.upload as upload
     local = tmp_path / 'local'; local.mkdir()
     for name in ('config.json', 'tokenizer.json', 'model.safetensors', 'configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'):
         (local / name).write_text('test')
-    remote = {'configuration_rh_nanochat.py': 'test', 'modeling_rh_nanochat.py': 'test',
-              'runA/config.json': 'old', 'runA/model.safetensors': 'weights',
+    (local / 'README.md').write_text('new card')
+    (local / 'assets').mkdir()
+    (local / 'assets' / 'new.png').write_text('new image')
+    remote = {'configuration_rh_nanochat.py': 'test', 'modeling_rh_nanochat.py': 'test', 'README.md': 'hand-edited', 'runA/README.md': 'hand-edited subfolder',
+              'runA/config.json': 'old', 'runA/model.safetensors': 'weights', 'runA/assets/old.png': 'old',
               'runB/config.json': 'old', 'runB/model.safetensors': 'weights',
               'model.safetensors': 'old', 'assets/old.png': 'old'}
     calls = []
@@ -288,13 +294,39 @@ def test_upload_guard(tmp_path, monkeypatch):
     assert len(calls) == 1 and calls[-1]['path_in_repo'] == 'runA'
     assert calls[-1]['delete_patterns'] == ['model.safetensors']
     assert '*.pt' in calls[-1]['ignore_patterns']
+    assert 'README.md' in calls[-1]['ignore_patterns']
+    assert 'assets/**' in calls[-1]['ignore_patterns']
+    assert 'runA/assets/old.png' in capsys.readouterr().out
     calls.clear()
     monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
     upload.main()
     patterns = calls[-1]['delete_patterns']
+    assert 'README.md' in calls[-1]['ignore_patterns']
     deleted = {key for key in remote if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)}
-    assert deleted == {'model.safetensors', 'assets/old.png'}
+    assert deleted == {'model.safetensors'}
+    assert 'assets/**' in calls[-1]['ignore_patterns']
+    assert 'assets/old.png' in capsys.readouterr().out
     assert 'runA/model.safetensors' not in deleted and 'runB/model.safetensors' not in deleted
+    from huggingface_hub.utils import filter_repo_objects
+    assert list(filter_repo_objects(['README.md', 'assets/new.png', 'assets/nested/new.png', 'config.json'],
+                                    ignore_patterns=calls[-1]['ignore_patterns'])) == ['config.json']
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite', '--replace-readme'])
+    upload.main()
+    assert 'README.md' not in calls[-1]['ignore_patterns']
+    assert 'assets/**' not in calls[-1]['ignore_patterns']
+    deleted = {key for key in remote if any(fnmatch.fnmatchcase(key, pattern) for pattern in calls[-1]['delete_patterns'])}
+    assert deleted == {'model.safetensors', 'assets/old.png'}
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite', '--keep-readme', '--replace-readme'])
+    with pytest.raises(SystemExit): upload.main()
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite', '--replace-readme'])
+    (local / 'README.md').unlink()
+    with pytest.raises(ValueError, match='local README.md is missing'): upload.main()
+    del remote['README.md']
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
+    upload.main()
+    assert 'README.md' not in calls[-1]['ignore_patterns']
+    assert 'assets/**' not in calls[-1]['ignore_patterns']
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
     remote['modeling_rh_nanochat.py'] = 'different'
     with pytest.raises(ValueError, match='differs'): upload.main()
 
@@ -415,7 +447,7 @@ def test_export_safety_and_asset_validation(tmp_path):
     original, _ = models(2)
     torch.save(original.state_dict(), ckpt / 'model_000001.pt')
     sha = hashlib.sha256((tokdir / 'tokenizer.pkl').read_bytes()).hexdigest()
-    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(original.config), 'tokenizer_sha256': sha}))
+    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(original.config), 'tokenizer_sha256': sha, 'user_config': {'run': 'test-run'}, 'val_bpb': .5}))
     unrelated = tmp_path / 'unrelated'; unrelated.mkdir(); (unrelated / 'precious').write_text('keep')
     with pytest.raises(ValueError, match='not an RH nanochat export'):
         convert(ckpt, tokdir, unrelated, overwrite=True)
@@ -424,6 +456,7 @@ def test_export_safety_and_asset_validation(tmp_path):
     with pytest.raises(ValueError, match='symlink'):
         convert(ckpt, tokdir, link, overwrite=True)
     results = tmp_path / 'results.md'
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .5}))
     (assets / 'notes.txt').write_text('not an image')
     for text in ('![x](assets/notes.txt)', '![x](assets/../x.png)', '![x](assets/missing.png)', '<img src="assets/a.png">'):
         results.write_text(text)
@@ -431,6 +464,13 @@ def test_export_safety_and_asset_validation(tmp_path):
         assert not out.exists()
     (assets / 'a.png').write_bytes(b'image'); (assets / 'unreferenced.png').write_bytes(b'no')
     results.write_text('![x](assets/a.png)')
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'wrong-run', 'final_validation_bpb': .5}))
+    with pytest.raises(ValueError, match='does not match checkpoint'):
+        convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .6}))
+    with pytest.raises(ValueError, match='does not match checkpoint'):
+        convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .5}))
     convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
     assert (out / 'assets/a.png').exists() and not (out / 'assets/unreferenced.png').exists()
     (out / 'assets/stale.png').write_bytes(b'stale')

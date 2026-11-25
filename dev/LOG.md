@@ -1087,3 +1087,7 @@ Muon was changed to use Polar Express, added NorMuon variance reduction, and cau
 **Observation:** modded-nanogpt does not appear to clip either right now.
 
 **Summary:** Deleted all grad-clip code paths. The code naturally produces well-behaved gradients. This improves a bit of MFU because we don't have to calculate and sync grad norms.
+
+## 2026-11-24: FLOP-horizon optimizer correction
+
+For `--target-flops`, automatic batch and Muon weight decay now use the actual token horizon `C / FLOPs_per_token`; previously they used `12 * effective_params`. This also affects ClimbMix runs: on the historical 24-point grid, 14 batch sizes change (new/old 0.25–4) and 21 weight decays change by over 5% (new/old 0.08–7.5). Do not combine the resulting rows with the 2026-08-09 sweep as though the optimizer settings were unchanged. Runs selected by the target parameter/data ratio retain their previous horizon.

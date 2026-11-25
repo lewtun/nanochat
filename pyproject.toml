@@ -13,7 +13,8 @@ dependencies = [
     "rustbpe>=0.1.0",
     "tiktoken>=0.11.0",
     "torch==2.9.1",
-    "trackio>=0.32.1",
+    "trackio==0.34.0; python_version < '3.11'",
+    "trackio>=0.38.1,<0.39; python_version >= '3.11'",
 ]
 
 [dependency-groups]

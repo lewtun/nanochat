@@ -16,6 +16,7 @@ from nanochat.dataset import parquets_iter_batched
 parser = argparse.ArgumentParser(description='Train a BPE tokenizer')
 parser.add_argument('--max-chars', type=int, default=2_000_000_000, help='Maximum characters to train on (default: 2B)')
 parser.add_argument('--doc-cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
+parser.add_argument('--document-eos', action='store_true', help='reserve a document EOS special token')
 parser.add_argument('--vocab-size', type=int, default=32768, help='Vocabulary size (default: 32768 = 2^15)')
 args = parser.parse_args()
 print(f"max_chars: {args.max_chars:,}")
@@ -46,7 +47,7 @@ text_iter = text_iterator()
 # -----------------------------------------------------------------------------
 # Train the tokenizer
 t0 = time.time()
-tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size)
+tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size, include_eos=args.document_eos)
 t1 = time.time()
 train_time = t1 - t0
 print(f"Training time: {train_time:.2f}s")
@@ -54,7 +55,7 @@ print(f"Training time: {train_time:.2f}s")
 # -----------------------------------------------------------------------------
 # Save the tokenizer to disk
 base_dir = get_base_dir()
-tokenizer_dir = os.path.join(base_dir, "tokenizer")
+tokenizer_dir = os.environ.get("NANOCHAT_TOKENIZER_DIR", os.path.join(base_dir, "tokenizer"))
 tokenizer.save(tokenizer_dir)
 
 # -----------------------------------------------------------------------------

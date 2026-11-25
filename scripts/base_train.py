@@ -27,10 +27,12 @@ import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.scaling import cap_batch_for_steps, scaling_token_horizon, compatible_device_batch
 from nanochat.common import compute_init, compute_cleanup, print0, DummyTracker, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
-from nanochat.loss_eval import evaluate_bpb
+from nanochat.loss_eval import evaluate_bpb, full_document_validation_batches
+from nanochat.dataset import list_parquet_files
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
@@ -43,6 +45,8 @@ parser = argparse.ArgumentParser(description="Pretrain base model")
 parser.add_argument("--run", type=str, default="dummy", help="Trackio run name ('dummy' disables experiment tracking)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--seed", type=int, default=42, help="model initialization seed")
+parser.add_argument("--feasibility-steps", type=int, default=0, help="stop after this many real optimizer steps for a memory check (0 disables)")
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
@@ -57,8 +61,15 @@ parser.add_argument("--num-iterations", type=int, default=-1, help="explicit num
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
 parser.add_argument("--target-param-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
 # Optimization
+parser.add_argument("--tokenizer-sha256", default="", help="expected SHA-256 of tokenizer.pkl")
+parser.add_argument("--tokenizer-bucket-path", default="", help="bucket URI of tokenizer.pkl for checkpoint provenance")
+parser.add_argument("--document-eos", action="store_true", help="encode complete documents with BOS and EOS")
+parser.add_argument("--track-data-exposure", action="store_true", help="count distinct text token positions seen; unsupported with resume")
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
+parser.add_argument("--microbatch-cap", type=int, default=0, help="cap the device microbatch after selecting the automatic total batch (0 disables)")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
+parser.add_argument("--min-steps", type=int, default=0, help="cap automatic batch to target at least this many FLOP-budget optimizer steps (0 disables)")
+parser.add_argument("--no-efficient-batch", action="store_true", help="retain historical automatic batch rounding for controlled comparisons")
 parser.add_argument("--embedding-lr", type=float, default=0.3, help="learning rate for embedding parameters (Adam)")
 parser.add_argument("--unembedding-lr", type=float, default=0.008, help="learning rate for unembedding parameters (Adam)")
 parser.add_argument("--weight-decay", type=float, default=0.28, help="cautious weight decay for the Muon optimizer (for weights)")
@@ -78,12 +89,27 @@ parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
+if args.feasibility_steps < 0:
+    parser.error("--feasibility-steps must be non-negative")
+if args.feasibility_steps and (args.resume_from_step >= 0 or args.target_flops <= 0 or args.num_iterations > 0):
+    parser.error("--feasibility-steps requires a fresh FLOP-budget run")
+if args.microbatch_cap < 0:
+    parser.error("--microbatch-cap must be non-negative")
+if args.microbatch_cap and args.total_batch_size != -1:
+    parser.error("--microbatch-cap requires an automatic total batch")
+if args.min_steps < 0:
+    parser.error("--min-steps must be non-negative")
+if args.min_steps and (args.total_batch_size != -1 or args.target_flops <= 0 or args.num_iterations > 0):
+    parser.error("--min-steps requires automatic batch size, --target-flops, and no --num-iterations override")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and experiment tracking
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+torch.manual_seed(args.seed)
+if device_type == 'cuda':
+    torch.cuda.manual_seed(args.seed)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -118,6 +144,13 @@ else:
 
 # -----------------------------------------------------------------------------
 # Tokenizer will be useful for evaluation and also we need the vocab size to init the model
+if args.tokenizer_sha256:
+    import hashlib
+    tokenizer_path = os.path.join(os.environ.get("NANOCHAT_TOKENIZER_DIR", os.path.join(get_base_dir(), "tokenizer")), "tokenizer.pkl")
+    with open(tokenizer_path, "rb") as handle:
+        actual_tokenizer_sha256 = hashlib.file_digest(handle, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(handle.read()).hexdigest()
+    if actual_tokenizer_sha256 != args.tokenizer_sha256:
+        raise ValueError("tokenizer.pkl SHA-256 does not match the expected tokenizer")
 tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
@@ -257,20 +290,22 @@ num_params = param_counts['total']
 num_flops_per_token = model.estimate_flops()
 print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
-# 1) Use scaling laws to determine the optimal training horizon in tokens
-# The compute-optimal models satisfy the Tokens:Params ratio of --target-param-data-ratio (derived experimentally via scaling laws analysis).
-# We've already initialized the model so we have Params. Optimal Tokens is now simply target-param-data-ratio * Params
+# 1) Use the FLOP-selected horizon, or the target tokens:parameters ratio when
+# the training horizon is selected by that ratio instead.
 def get_scaling_params(m):
     # As for which params to use exactly, transformer matrices + lm_head gives cleanest scaling laws (see dev/LOG.md Jan 27, 2026)
     params_counts = m.num_scaling_params()
     scaling_params = params_counts['transformer_matrices'] + params_counts['lm_head']
     return scaling_params
 num_scaling_params = get_scaling_params(model)
-target_tokens = int(args.target_param_data_ratio * num_scaling_params) # optimal tokens for the model we are about to train
+scaling_ratio = args.target_param_data_ratio if args.target_param_data_ratio > 0 else 12.0
+target_tokens = scaling_token_horizon(num_scaling_params, scaling_ratio, args.target_flops,
+                                      num_flops_per_token, args.target_flops > 0 and args.num_iterations <= 0)
+print0(f"Scaling horizon tokens: {target_tokens:.12g}")
 
 # Our reference model is d12, this is where a lot of hyperparameters are tuned and then transfered to higher depths (muP style)
 d12_ref = build_model_meta(12) # creates the model on meta device
-D_REF = args.target_param_data_ratio * get_scaling_params(d12_ref) # compute-optimal d12 training horizon in tokens (measured empirically)
+D_REF = scaling_ratio * get_scaling_params(d12_ref) # compute-optimal d12 training horizon in tokens (measured empirically)
 B_REF = 2**19 # optimal batch size at d12 ~= 524,288 tokens (measured empirically)
 
 # 2) Now that we have the token horizon, we can calculate the optimal batch size
@@ -280,7 +315,35 @@ total_batch_size = args.total_batch_size # user-provided override is possible
 if total_batch_size == -1:
     batch_size_ratio = target_tokens / D_REF
     predicted_batch_size = B_REF * batch_size_ratio ** 0.383
-    total_batch_size = 2 ** round(math.log2(predicted_batch_size)) # clamp to nearest power of 2 for efficiency
+    minimum_batch = args.max_seq_len * ddp_world_size
+    if args.min_steps > 0:
+        total_batch_size = max(minimum_batch, round(predicted_batch_size / minimum_batch) * minimum_batch)
+    else:
+        total_batch_size = 2 ** round(math.log2(predicted_batch_size)) # historical default
+    if args.min_steps > 0 and args.target_flops > 0:
+        total_batch_size = cap_batch_for_steps(total_batch_size, args.target_flops,
+                                               num_flops_per_token, args.min_steps,
+                                               args.max_seq_len * ddp_world_size)
+        print0(f"Budget-limited batch: {total_batch_size:,} tokens for at least {args.min_steps} steps")
+    # A batch must contain at least one full sequence per rank. Choose the
+    # largest compatible device batch up to the requested memory limit.
+    minimum_batch = args.max_seq_len * ddp_world_size
+    total_batch_size = max(total_batch_size, minimum_batch)
+    if total_batch_size % minimum_batch:
+        total_batch_size = (total_batch_size // minimum_batch) * minimum_batch
+    if args.min_steps > 0 and not args.no_efficient_batch:
+        from nanochat.scaling import efficient_auto_batch
+        original_batch = total_batch_size
+        total_batch_size, device_batch = efficient_auto_batch(total_batch_size, args.max_seq_len, ddp_world_size, args.device_batch_size)
+        if total_batch_size != original_batch:
+            print0(f"Adjusted automatic batch for efficient microbatches: {original_batch:,} -> {total_batch_size:,} tokens")
+    else:
+        device_batch = compatible_device_batch(total_batch_size, args.max_seq_len, ddp_world_size, args.device_batch_size)
+    if args.microbatch_cap:
+        device_batch = compatible_device_batch(total_batch_size, args.max_seq_len, ddp_world_size, min(device_batch, args.microbatch_cap))
+    if device_batch != args.device_batch_size:
+        print0(f"Reducing device batch size from {args.device_batch_size} to {device_batch} to fit the automatic total batch")
+        args.device_batch_size = device_batch
     print0(f"Auto-computed optimal batch size: {total_batch_size:,} tokens")
 
 # 3) Knowing the batch size, we can now calculate a learning rate correction (bigger batch size allows higher learning rates)
@@ -300,6 +363,7 @@ if batch_ratio != 1.0:
 # λ = λ_ref · √(B/B_ref) · (D_ref/D)
 # Note that these papers study AdamW, *not* Muon. We are blindly following AdamW theory for scaling hoping it ~works for Muon too.
 weight_decay_scaled = args.weight_decay * math.sqrt(total_batch_size / B_REF) * (D_REF / target_tokens)
+print0(f"Scaling optimizer: batch_lr_scale={batch_lr_scale:.12g} weight_decay={weight_decay_scaled:.12g}")
 if weight_decay_scaled != args.weight_decay:
     print0(f"Scaling weight decay from {args.weight_decay:.6f} to {weight_decay_scaled:.6f} for depth {args.depth}")
 
@@ -328,8 +392,10 @@ if scaler is not None:
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
-build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device)
+if args.track_data_exposure and resuming:
+    raise ValueError("Data exposure tracking does not support resuming")
+train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, track_data_exposure=args.track_data_exposure, document_eos=args.document_eos)
+build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device, document_eos=args.document_eos)
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------
@@ -351,6 +417,10 @@ elif args.target_param_data_ratio > 0:
     print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
 else:
     raise ValueError("No training horizon specified")
+if num_iterations <= 0:
+    raise ValueError("The training budget is too small for one optimizer step at this batch size")
+if args.feasibility_steps and args.feasibility_steps >= num_iterations:
+    raise ValueError("The feasibility check must stop before the training horizon")
 total_tokens = total_batch_size * num_iterations # the actual number of tokens we will train for
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
@@ -358,8 +428,9 @@ print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
-    warmup_iters = args.warmup_steps
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
+    # Finish warmup before warmdown even for very short FLOP budgets.
+    warmup_iters = min(args.warmup_steps, max(1, num_iterations - warmdown_iters)) if args.min_steps > 0 else args.warmup_steps
     if it < warmup_iters:
         return (it + 1) / warmup_iters
     elif it <= num_iterations - warmdown_iters:
@@ -372,8 +443,9 @@ def get_lr_multiplier(it):
 def get_muon_momentum(it):
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
     warmdown_start = num_iterations - warmdown_iters
-    if it < 400:
-        frac = it / 400
+    momentum_warmup = min(400, max(1, warmdown_start)) if args.min_steps > 0 else 400
+    if it < momentum_warmup:
+        frac = it / momentum_warmup
         return (1 - frac) * 0.85 + frac * 0.97
     elif it >= warmdown_start:
         progress = (it - warmdown_start) / warmdown_iters
@@ -420,10 +492,17 @@ while True:
     # once in a while: evaluate the val bpb (all ranks participate)
     if args.eval_every > 0 and (last_step or step % args.eval_every == 0):
         model.eval()
-        val_loader = build_val_loader()
-        eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        if args.document_eos:
+            val_loader = full_document_validation_batches(tokenizer, list_parquet_files()[-1], args.device_batch_size,
+                                                            args.max_seq_len, ddp_rank, ddp_world_size, device)
+            # Original model permits variable padded lengths without recompilation.
+            with disable_fp8(orig_model):
+                val_bpb = evaluate_bpb(orig_model, val_loader, None, token_bytes)
+        else:
+            val_loader = build_val_loader()
+            eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+            with disable_fp8(model):
+                val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -482,10 +561,17 @@ while True:
                 "step": step,
                 "val_bpb": val_bpb, # loss at last step
                 "model_config": model_config_kwargs,
+                "document_eos": args.document_eos,
+                "eos_token_id": tokenizer.encode_special('<|eos|>') if args.document_eos else None,
+                "tokenizer_sha256": args.tokenizer_sha256 or None,
+                "tokenizer_bucket_path": args.tokenizer_bucket_path or None,
                 "user_config": user_config, # inputs to the training script
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,
                 "total_batch_size": total_batch_size,
+                "scaling_horizon_tokens": target_tokens,
+                "batch_lr_scale": batch_lr_scale,
+                "weight_decay_scaled": weight_decay_scaled,
                 "dataloader_state_dict": dataloader_state_dict,
                 "loop_state": { # all loop state (other than step) so that we can resume training
                     "min_val_bpb": min_val_bpb,
@@ -498,6 +584,11 @@ while True:
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
+        if args.track_data_exposure:
+            exposure = torch.tensor([trained_data_state["unique_text_tokens"], trained_data_state["text_tokens"]], device=device, dtype=torch.int64)
+            if is_ddp_initialized():
+                dist.all_reduce(exposure, op=dist.ReduceOp.SUM)
+            print0(f"Text exposure: unique_tokens={exposure[0].item()} text_tokens={exposure[1].item()}")
         break
 
     # -------------------------------------------------------------------------
@@ -513,6 +604,7 @@ while True:
             scaler.scale(loss).backward()
         else:
             loss.backward()
+        trained_data_state = dataloader_state_dict
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
     # step the optimizer
     lrm = get_lr_multiplier(step)
@@ -579,6 +671,14 @@ while True:
     # state update
     first_step_of_run = (step == 0) or (resuming and step == args.resume_from_step)
     step += 1
+    if args.feasibility_steps and step >= args.feasibility_steps:
+        if device_type == 'cuda':
+            peaks = torch.tensor([torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()], dtype=torch.int64, device=device)
+            if is_ddp_initialized():
+                torch.distributed.all_reduce(peaks, op=torch.distributed.ReduceOp.MAX)
+            print0(f"Feasibility peak across ranks: allocated={int(peaks[0])} reserved={int(peaks[1])} bytes")
+        print0(f"Feasibility check completed {step} optimizer steps; no checkpoint saved")
+        break
 
     # The garbage collector is sadly a little bit overactive and for some poorly understood reason,
     # it spends ~500ms scanning for cycles quite frequently, just to end up cleaning up very few tiny objects each time.
