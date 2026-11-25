@@ -26,7 +26,6 @@ parser.add_argument('--head-dim', type=int, default=64)
 parser.add_argument('--noise-sigma', type=float, default=0, help='independently measured BPB noise floor (pooled with residual estimate conservatively)')
 parser.add_argument('--repeated-noise-sigma', type=float, help='independent repeated-data noise floor; pool residual variance separately by regime')
 parser.add_argument('--diagnostics', type=Path, help='JSON with controlled seed and optimizer comparisons for the model card')
-parser.add_argument('--allow-a100-fallback', action='store_true', help='allow explicitly identified A100 rows when the corresponding Hopper run failed')
 args = parser.parse_args()
 if not np.isfinite(args.noise_sigma) or args.noise_sigma < 0:
     parser.error('--noise-sigma must be finite and nonnegative')
@@ -54,14 +53,15 @@ for path in args.results:
                 raise ValueError(f'{path}: incompatible model width or fewer than 500 optimizer steps')
             point = (float(r['flops_budget']), int(r['depth']))
             name = r.get('run_name') or f'{path}:depth={r["depth"]}'
-            if 'rh-c-a100' in name and not args.allow_a100_fallback:
-                raise ValueError(f'{path}: A100 comparison row {name} is excluded from the Hopper grid; explicitly allow a documented fallback if its Hopper run failed')
+            if 'rh-c-a100' in name:
+                raise ValueError(f'{path}: A100 row {name} is excluded from the H200-only grid')
             if point in seen_points:
                 raise ValueError(f'Duplicate budget/depth {point}: {seen_points[point]} and {name}')
             seen_points[point] = name
             row = {k: float(r[k]) for k in ('flops_budget', 'effective_params', 'tokens_trained', 'text_tokens_trained', 'unique_tokens', 'passes', 'repeat_factor', 'val_bpb')}
             row['run_name'] = name
             row['depth'] = int(r['depth'])
+            row['nproc_per_node'] = int(r['nproc_per_node']) if r.get('nproc_per_node') else None
             rows.append(row)
 if not rows:
     raise SystemExit('No results')
@@ -310,9 +310,13 @@ if args.area_dir:
 card=['## Scaling-law results','','We trained on the Lean corpus with held-out source directories. The figures report validation bits per byte, training compute and effective parameters (transformer matrices plus the language-model head).','',
       '![IsoFLOP curves](assets/isoflop.png)','','![Best loss against compute](assets/best_loss.png)','','![Optimal model size and training tokens](assets/optimal_nd.png)','','![Optimal tokens per parameter](assets/tokens_per_param.png)','']
 card += [f"The selected checkpoint is depth {selection['depth']} at {selection['budget']:.3g} training FLOPs, the tested model closest in log parameter count to the fitted optimum at the largest valid budget. Its final-checkpoint matched-validation loss is {selection['final_validation_bpb']:.4f} bits per byte.", '']
-if any('rh-c-a100' in row['run_name'] for row in rows):
-    card += ['The sweep includes explicitly selected A100 fallback rows after corresponding Hopper failures. A100 runs use smaller device microbatches and may use a different attention backend. Gradient accumulation and hardware can introduce numerical differences.', '']
-if any('rh-c-a100x4-' in row['run_name'] or 'rh-c-h200x4-' in row['run_name'] for row in rows):
+card += ['All scaling rows were trained on H200 GPUs. Node sizes by compute budget:', '']
+for budget in sorted({row['flops_budget'] for row in rows}):
+    counts = {row['nproc_per_node'] for row in rows if row['flops_budget'] == budget}
+    sizes = ', '.join('unrecorded' if n is None else ('h200' if n == 1 else f'h200x{n}') for n in sorted(counts, key=lambda n: n or 0))
+    card.append(f"- {budget:.3g} FLOPs: {sizes}")
+card += ['']
+if any('rh-c-h200x4-' in row['run_name'] for row in rows):
     card += ['Four-GPU runs were included only where the automatically selected total batch matched the eight-GPU setting. Rank count changes data ordering and optimizer-state sharding as well as numerical rounding, so these runs are not exact replicas.', '']
 if manifest.get('train') and manifest.get('validation'):
     train, val = manifest['train'], manifest['validation']
@@ -333,13 +337,6 @@ if args.diagnostics:
         examples = diagnostics['late_overfitting_examples']
         descriptions = ', '.join(f"depth {e['depth']}: {e['intermediate_min_bpb']:.4f} to {e['final_bpb']:.4f}" for e in examples['runs'])
         card += [f"At {examples['budget']:.3g} FLOPs, some smaller models overfit late in training: intermediate minimum to final matched-validation BPB was {descriptions}. All scaling fits and model selection use final checkpoints, not these intermediate minima.", '']
-    if 'cross_hardware_intermediate' in diagnostics:
-        comparison = diagnostics['cross_hardware_intermediate']
-        card += [f"At {comparison['budget']:.3g} FLOPs, depth {comparison['depth']} and step {comparison['step']}, intermediate matched-validation BPB was {comparison['h200_bpb']:.6f} on H200x4 and {comparison['a100_bpb']:.6f} on A100x4. These runs also differ in microbatch size and potentially data ordering and attention backend; the intermediate difference is not a final-checkpoint estimate of hardware noise.", '']
-    if 'cross_hardware_final' in diagnostics:
-        comparison = diagnostics['cross_hardware_final']
-        descriptions = ', '.join(f"depth {e['depth']}: H200 {e['h200_bpb']:.6f}, A100 {e['a100_bpb']:.6f}" for e in comparison['runs'])
-        card += [f"At {comparison['budget']:.3g} FLOPs, final-checkpoint cross-flavor comparisons gave {descriptions} BPB. These comparisons also change microbatch size and potentially data ordering and attention backend.", '']
 if regime_noise:
     card += [f"Bootstrap noise uses residual variance pooled separately across fresh and repeated regimes, with independent seed-derived floors; the resulting standard deviations are {regime_noise['fresh']:.4f} and {regime_noise['repeated']:.4f} BPB, respectively. These estimates assume noise is comparable within each regime.", '']
 if area_plot: card += ['![Difficulty by source area](assets/directory_difficulty.png)','']
