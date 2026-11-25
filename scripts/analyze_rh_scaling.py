@@ -197,7 +197,7 @@ if len(headline) >= 3:
         intervals = np.percentile(slopes, [2.5, 97.5], axis=0)
         headline_fit['conditional_params_exponent_ci'] = intervals[:,0].tolist()
         headline_fit['conditional_tokens_exponent_ci'] = intervals[:,1].tolist()
-        headline_fit['unconditional_ci_status'] = 'resolved' if success_fraction >= .95 else 'unresolved due to failed fits'
+        headline_fit['unconditional_ci_status'] = 'resolved' if success_fraction == 1.0 else 'unresolved due to failed fits'
     fits['headline'] = headline_fit
 if len(optimal) >= 3:
     all_x = np.log10([r['flops'] for r in optimal])
