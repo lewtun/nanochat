@@ -316,6 +316,9 @@ if args.diagnostics:
     seed = diagnostics['seed_comparison']
     decay = diagnostics['weight_decay_comparison']
     card += [f"A second initialization seed at {seed['budget']:.3g} FLOPs across {len(seed['depths'])} depths gave a provisional {seed['noise_sigma_bpb']:.4f} BPB single-run noise estimate; data order was unchanged. Reducing the reference weight decay from {decay['baseline_reference_decay']:.2f} to {decay['comparison_reference_decay']:.2f} worsened those depths by {min(decay['bpb_differences']):.3f}–{max(decay['bpb_differences']):.3f} BPB. The fitted scaling behavior is conditional on the optimizer schedule.", '']
+    if 'repeated_seed_comparison' in diagnostics:
+        repeat_seed = diagnostics['repeated_seed_comparison']
+        card += [f"A second seed at {repeat_seed['budget']:.3g} FLOPs across {len(repeat_seed['depths'])} depths gave a provisional {repeat_seed['noise_sigma_bpb']:.6f} BPB single-run noise estimate. Both seed estimates use only three pairs and hold data order fixed.", '']
     if 'batch_comparison' in diagnostics:
         batch = diagnostics['batch_comparison']
         card += [f"At {batch['budget']:.3g} FLOPs and depth {batch['depth']}, an efficient batch changed BPB from {batch['baseline_bpb']:.6f} to {batch['comparison_bpb']:.6f}. This comparison also slightly changed total batch and optimizer scaling, so it does not isolate numerical rounding.", '']
