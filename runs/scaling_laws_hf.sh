@@ -39,7 +39,8 @@ TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-24h}"
 TRAIN_SEED="${TRAIN_SEED:-42}"
 EFFICIENT_BATCH="${EFFICIENT_BATCH:-1}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.28}"
-export TRAIN_SEED EFFICIENT_BATCH WEIGHT_DECAY
+DEVICE_BATCH_LIMIT="${DEVICE_BATCH_LIMIT:-0}"
+export TRAIN_SEED EFFICIENT_BATCH WEIGHT_DECAY DEVICE_BATCH_LIMIT
 NANOCHAT_MOUNT="${NANOCHAT_MOUNT:-/mnt/nanochat}"
 
 read -r -a FLOPS_BUDGETS <<< "${FLOPS_BUDGETS:-1e18 2.15e18 4.64e18 1e19}"
@@ -168,6 +169,7 @@ validate_settings() {
     [[ "$HEAD_DIM" =~ ^[1-9][0-9]*$ && "$MIN_STEPS" =~ ^[0-9]+$ ]] || die "Invalid HEAD_DIM or MIN_STEPS"
     [[ "$DOCUMENT_EOS" == 0 || "$DOCUMENT_EOS" == 1 ]] || die "Invalid DOCUMENT_EOS"
     [[ "$TRAIN_SEED" =~ ^[0-9]+$ && ( "$EFFICIENT_BATCH" == 0 || "$EFFICIENT_BATCH" == 1 ) ]] || die "Invalid TRAIN_SEED or EFFICIENT_BATCH"
+    [[ "$DEVICE_BATCH_LIMIT" =~ ^[0-9]+$ ]] || die "Invalid DEVICE_BATCH_LIMIT"
     [[ "$ASSET_PREFIX" != rh || ( "$DOCUMENT_EOS" == 1 && "$DATA_PREFIX" == base_data && "$HEAD_DIM" == 64 ) ]] || die "RH requires canonical data, EOS, and 64-channel heads"
     [[ "$MANIFEST_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$MANIFEST_PATH" != *..* && "$MANIFEST_PATH" != /* ]] || die "Invalid MANIFEST_PATH"
     [[ "$CORE_METRIC" == 0 || "$CORE_METRIC" == 1 ]] || die "CORE_METRIC must be 0 or 1"
@@ -479,6 +481,7 @@ payload = {
     "train_seed": int(os.environ["TRAIN_SEED"]),
     "efficient_batch": os.environ["EFFICIENT_BATCH"] == "1",
     "weight_decay": float(os.environ["WEIGHT_DECAY"]),
+    "device_batch_limit": int(os.environ["DEVICE_BATCH_LIMIT"]),
     "data_prefix": os.environ["DATA_PREFIX"],
     "eval_tokens": int(os.environ["EVAL_TOKENS"]),
     "core_metric": os.environ["CORE_METRIC"] == "1",
@@ -501,7 +504,7 @@ if target.exists() and has_rows:
     old = json.loads(target.read_text())
     keys = ("asset_prefix", "data_prefix", "head_dim", "min_steps", "document_eos", "eval_tokens",
             "nproc_per_node", "tokenizer_sha256", "tokenizer_bucket_path", "core_metric", "git_sha",
-            "train_seed", "efficient_batch", "weight_decay", "data_manifest_git_sha", "data_manifest_sha256")
+            "train_seed", "efficient_batch", "weight_decay", "device_batch_limit", "data_manifest_git_sha", "data_manifest_sha256")
     changed = [key for key in keys if old.get(key) != payload[key]]
     if changed:
         raise SystemExit(f"Existing label has incompatible provenance: {', '.join(changed)}; use a new label or resume with GIT_REF={old.get('git_sha')}")
@@ -711,6 +714,9 @@ PYSTEPS
         device_batch=16
     else
         device_batch=32
+    fi
+    if (( DEVICE_BATCH_LIMIT > 0 && DEVICE_BATCH_LIMIT < device_batch )); then
+        device_batch="$DEVICE_BATCH_LIMIT"
     fi
 
     horizon_args=(--target-flops="$flops_budget" --target-param-data-ratio=-1)
@@ -937,6 +943,7 @@ launcher_main() {
         --env "TRAIN_SEED=$TRAIN_SEED"
         --env "EFFICIENT_BATCH=$EFFICIENT_BATCH"
         --env "WEIGHT_DECAY=$WEIGHT_DECAY"
+        --env "DEVICE_BATCH_LIMIT=$DEVICE_BATCH_LIMIT"
         --env "CORE_METRIC=$CORE_METRIC"
         --env "EVAL_TOKENS=$EVAL_TOKENS"
         --env "MIN_TOKEN_PARAM_RATIO=$MIN_TOKEN_PARAM_RATIO"
