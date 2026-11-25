@@ -185,6 +185,7 @@ selection = {'budget': largest['flops'], 'depth': selected['depth'], 'run_name':
              'window_sensitive': budget_status[str(largest['flops'])]['sensitive'],
              'window_shift_invalid': budget_status[str(largest['flops'])]['invalid_shift'],
              'final_validation_bpb': selected['val_bpb'],
+             'passes': selected['passes'],
              'is_best_measured': selected['val_bpb'] == best_measured['val_bpb'],
              'best_measured_depth': best_measured['depth'],
              'best_measured_bpb': best_measured['val_bpb'],
@@ -349,7 +350,7 @@ if args.diagnostics:
     diagnostics = json.loads(args.diagnostics.read_text())
 total_text = f" and {selection['params_total']:,} total parameters" if selection['params_total'] is not None else ''
 best_text = ' It is also the best-measured run at that budget.' if selection['is_best_measured'] else f" The best-measured run at that budget is depth {selection['best_measured_depth']} (BPB {selection['best_measured_bpb']:.6f})."
-card += [f"riemann-nano is depth {selection['depth']}, the tested checkpoint nearest the fitted optimum at the largest headline budget ({selection['budget']:.3g} FLOPs). It has {selection['effective_params']:,.0f} effective parameters{total_text}, and final matched-validation BPB {selection['final_validation_bpb']:.6f}.{best_text} The fitted optimum is {selection['fitted_optimum_params']:,.0f} effective parameters; shifting the fitting window changes it by up to {100*selection['window_shift_fraction']:.1f}%.", '', '## Limitations', '']
+card += ['', f"riemann-nano is depth {selection['depth']}, the tested checkpoint nearest the fitted optimum at the largest headline budget ({selection['budget']:.3g} FLOPs). It has {selection['effective_params']:,.0f} effective parameters{total_text}, was trained for {selection['passes']:.2f} passes, and achieved final matched-validation BPB {selection['final_validation_bpb']:.6f}.{best_text} The fitted optimum is {selection['fitted_optimum_params']:,.0f} effective parameters; shifting the fitting window changes it by up to {100*selection['window_shift_fraction']:.1f}%.", '', '## Limitations', '']
 if any(r['flops'] > args.headline_max_flops for r in optimal):
     card += ['Larger budgets (1e18–3e18 FLOPs) were also explored; the corpus repeats and their optima depart from the headline scaling law. Those runs are not part of this release.', '']
 if manifest.get('train') and manifest.get('validation'):
