@@ -321,7 +321,10 @@ ax.set(xscale='log', xlabel='Effective parameters', ylabel='Final validation bit
 ax.legend(fontsize=7, loc='upper right')
 if headline:
     hx = np.array([r['flops'] for r in headline]); hy = np.array([r['effective_params'] for r in headline])
-    nx.loglog(hx, hy, 'o', color='#2878b5', label='Fitted optima')
+    # The selected model replaces the regular marker at its budget; the fit
+    # below still uses every headline optimum, including that budget.
+    marker_mask = hx != selected['flops_budget']
+    nx.loglog(hx[marker_mask], hy[marker_mask], 'o', color='#2878b5', label='Fitted optima')
     fit = fits.get('headline', {})
     if 'params_exponent' in fit:
         xx = np.geomspace(hx.min(), hx.max(), 160)
