@@ -44,6 +44,8 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     fits = json.loads((output / 'fits.json').read_text())
     assert fits['fresh']['n'] == 3
     assert fits['all_budgets']['n'] == 3
+    assert fits['headline']['n'] == 3
+    assert len(list(csv.DictReader((output / 'optimal_headline.csv').open()))) == 3
     assert 'mix fresh and repeated' in fits['all_budgets']['note']
     assert fits['data_constrained']['status'] != 'fit'
     selection = json.loads((output / 'selected_model.json').read_text())
