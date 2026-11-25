@@ -92,12 +92,13 @@ def test_convert_roundtrip(tmp_path):
     tokenizer.save(tokdir)
     orig, _ = models(2)
     torch.save(orig.state_dict(), ckpt / 'model_000001.pt')
-    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(orig.config), 'tokenizer_sha256': hashlib.sha256((tokdir / 'tokenizer.pkl').read_bytes()).hexdigest()}))
+    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(orig.config), 'tokenizer_sha256': hashlib.sha256((tokdir / 'tokenizer.pkl').read_bytes()).hexdigest(), 'user_config': {'run': 'test-run'}, 'val_bpb': .5}))
     plots = tmp_path / 'plots'
     plots.mkdir()
     (plots / 'isoflop.png').write_bytes(b'example plot')
     results = tmp_path / 'results.md'
     results.write_text('## Scaling-law results\n\n![isoFLOP](assets/isoflop.png)\n\n| N | D |\n|---|---|\n| 1 | 2 |\n')
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .5}))
     convert(ckpt, tokdir, out, results_markdown=results, assets_dir=plots)
     assert 'license: apache-2.0' in (out / 'README.md').read_text()
     assert 'license terms have not been established' not in (out / 'README.md').read_text()
@@ -417,7 +418,7 @@ def test_export_safety_and_asset_validation(tmp_path):
     original, _ = models(2)
     torch.save(original.state_dict(), ckpt / 'model_000001.pt')
     sha = hashlib.sha256((tokdir / 'tokenizer.pkl').read_bytes()).hexdigest()
-    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(original.config), 'tokenizer_sha256': sha}))
+    (ckpt / 'meta_000001.json').write_text(json.dumps({'model_config': vars(original.config), 'tokenizer_sha256': sha, 'user_config': {'run': 'test-run'}, 'val_bpb': .5}))
     unrelated = tmp_path / 'unrelated'; unrelated.mkdir(); (unrelated / 'precious').write_text('keep')
     with pytest.raises(ValueError, match='not an RH nanochat export'):
         convert(ckpt, tokdir, unrelated, overwrite=True)
@@ -426,6 +427,7 @@ def test_export_safety_and_asset_validation(tmp_path):
     with pytest.raises(ValueError, match='symlink'):
         convert(ckpt, tokdir, link, overwrite=True)
     results = tmp_path / 'results.md'
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .5}))
     (assets / 'notes.txt').write_text('not an image')
     for text in ('![x](assets/notes.txt)', '![x](assets/../x.png)', '![x](assets/missing.png)', '<img src="assets/a.png">'):
         results.write_text(text)
@@ -433,6 +435,13 @@ def test_export_safety_and_asset_validation(tmp_path):
         assert not out.exists()
     (assets / 'a.png').write_bytes(b'image'); (assets / 'unreferenced.png').write_bytes(b'no')
     results.write_text('![x](assets/a.png)')
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'wrong-run', 'final_validation_bpb': .5}))
+    with pytest.raises(ValueError, match='does not match checkpoint'):
+        convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .6}))
+    with pytest.raises(ValueError, match='does not match checkpoint'):
+        convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
+    (tmp_path / 'selected_model.json').write_text(json.dumps({'run_name': 'test-run', 'final_validation_bpb': .5}))
     convert(ckpt, tokdir, out, results_markdown=results, assets_dir=assets)
     assert (out / 'assets/a.png').exists() and not (out / 'assets/unreferenced.png').exists()
     (out / 'assets/stale.png').write_bytes(b'stale')

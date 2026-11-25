@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import math
 import pickle
 import re
 import shutil
@@ -84,6 +85,12 @@ def convert(checkpoint_dir, tokenizer_dir, output_dir, step=None, results_markdo
     results = Path(results_markdown).read_text(encoding='utf-8') if results_markdown else None
     assets = []
     if results is not None:
+        selection_path = Path(results_markdown).parent / 'selected_model.json'
+        if not selection_path.is_file():
+            raise ValueError('Results Markdown requires adjacent selected_model.json')
+        selection = json.loads(selection_path.read_text())
+        if selection.get('run_name') != meta.get('user_config', {}).get('run') or not math.isclose(float(selection['final_validation_bpb']), float(meta['val_bpb']), rel_tol=0, abs_tol=1e-6):
+            raise ValueError('Results selection does not match checkpoint run and validation BPB')
         image_pattern = r'!\[[^\]]*\]\((assets/[^\s)]+)(?:\s+[^)]*)?\)'
         if re.search(r'(?:\./)?assets/', re.sub(image_pattern, '', results)):
             raise ValueError('Asset references must use inline ![alt](assets/image.png) syntax')

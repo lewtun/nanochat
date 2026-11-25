@@ -23,7 +23,7 @@ python -m hf_export.convert CHECKPOINT_DIR TOKENIZER_DIR OUTPUT_DIR \
   --results-markdown RESULTS_SECTION.md --assets-dir PLOTS_DIR
 ```
 
-The results Markdown is appended to the Apache 2.0 model card. Referenced images must use relative links such as `assets/isoflop.png`; the converter checks and copies those images into `OUTPUT_DIR/assets/`. Complete the card's training split and limitations before sharing.
+The results Markdown is appended to the Apache 2.0 model card. An adjacent `selected_model.json` must match the checkpoint's run name and final validation BPB. Referenced images must use relative links such as `assets/scaling.png`; the converter checks and copies those images into `OUTPUT_DIR/assets/`. Complete the card's training split and limitations before sharing.
 
 Upload to an existing private model repository with `python -m hf_export.upload OUTPUT_DIR OWNER/REPO`. The uploader refuses public repositories and pickle files, checks required export files, and refuses to replace an existing export unless `--overwrite` is passed. For a collection of runs, use `--path-in-repo RUN_NAME`; the uploader places matching remote-code files at the repository root. Load a run with `AutoModelForCausalLM.from_pretrained(REPO, subfolder=RUN_NAME, trust_remote_code=True)` and likewise for `AutoTokenizer`. Existing root modeling files must match, so use a separate repository or branch for incompatible code.
 
