@@ -252,14 +252,17 @@ def test_prompt_lookup_and_cache_crop():
     torch.testing.assert_close(result, model(fresh, use_cache=False).logits[:, -1:], atol=2e-6, rtol=2e-5)
 
 
-def test_upload_guard(tmp_path, monkeypatch):
+def test_upload_guard(tmp_path, monkeypatch, capsys):
     import fnmatch
     import hf_export.upload as upload
     local = tmp_path / 'local'; local.mkdir()
     for name in ('config.json', 'tokenizer.json', 'model.safetensors', 'configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'):
         (local / name).write_text('test')
+    (local / 'README.md').write_text('new card')
+    (local / 'assets').mkdir()
+    (local / 'assets' / 'new.png').write_text('new image')
     remote = {'configuration_rh_nanochat.py': 'test', 'modeling_rh_nanochat.py': 'test', 'README.md': 'hand-edited', 'runA/README.md': 'hand-edited subfolder',
-              'runA/config.json': 'old', 'runA/model.safetensors': 'weights',
+              'runA/config.json': 'old', 'runA/model.safetensors': 'weights', 'runA/assets/old.png': 'old',
               'runB/config.json': 'old', 'runB/model.safetensors': 'weights',
               'model.safetensors': 'old', 'assets/old.png': 'old'}
     calls = []
@@ -292,14 +295,38 @@ def test_upload_guard(tmp_path, monkeypatch):
     assert calls[-1]['delete_patterns'] == ['model.safetensors']
     assert '*.pt' in calls[-1]['ignore_patterns']
     assert 'README.md' in calls[-1]['ignore_patterns']
+    assert 'assets/**' in calls[-1]['ignore_patterns']
+    assert 'runA/assets/old.png' in capsys.readouterr().out
     calls.clear()
     monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
     upload.main()
     patterns = calls[-1]['delete_patterns']
     assert 'README.md' in calls[-1]['ignore_patterns']
     deleted = {key for key in remote if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)}
-    assert deleted == {'model.safetensors', 'assets/old.png'}
+    assert deleted == {'model.safetensors'}
+    assert 'assets/**' in calls[-1]['ignore_patterns']
+    assert 'assets/old.png' in capsys.readouterr().out
     assert 'runA/model.safetensors' not in deleted and 'runB/model.safetensors' not in deleted
+    from huggingface_hub.utils import filter_repo_objects
+    assert list(filter_repo_objects(['README.md', 'assets/new.png', 'assets/nested/new.png', 'config.json'],
+                                    ignore_patterns=calls[-1]['ignore_patterns'])) == ['config.json']
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite', '--replace-readme'])
+    upload.main()
+    assert 'README.md' not in calls[-1]['ignore_patterns']
+    assert 'assets/**' not in calls[-1]['ignore_patterns']
+    deleted = {key for key in remote if any(fnmatch.fnmatchcase(key, pattern) for pattern in calls[-1]['delete_patterns'])}
+    assert deleted == {'model.safetensors', 'assets/old.png'}
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite', '--keep-readme', '--replace-readme'])
+    with pytest.raises(SystemExit): upload.main()
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite', '--replace-readme'])
+    (local / 'README.md').unlink()
+    with pytest.raises(ValueError, match='local README.md is missing'): upload.main()
+    del remote['README.md']
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
+    upload.main()
+    assert 'README.md' not in calls[-1]['ignore_patterns']
+    assert 'assets/**' not in calls[-1]['ignore_patterns']
+    monkeypatch.setattr(sys, 'argv', ['upload', str(local), 'owner/repo', '--overwrite'])
     remote['modeling_rh_nanochat.py'] = 'different'
     with pytest.raises(ValueError, match='differs'): upload.main()
 

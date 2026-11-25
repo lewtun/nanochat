@@ -11,6 +11,11 @@ def main():
     p.add_argument('folder'); p.add_argument('repo_id')
     p.add_argument('--path-in-repo', default='', help='Destination subfolder within the repository')
     p.add_argument('--overwrite', action='store_true')
+    cards = p.add_mutually_exclusive_group()
+    cards.add_argument('--keep-readme', dest='keep_readme', action='store_true', default=True,
+                       help='Keep an existing destination README and its assets (default)')
+    cards.add_argument('--replace-readme', dest='keep_readme', action='store_false',
+                       help='Upload the local README and assets')
     args = p.parse_args()
     folder = Path(args.folder)
     for name in ('config.json', 'tokenizer.json', 'configuration_rh_nanochat.py', 'modeling_rh_nanochat.py'):
@@ -46,6 +51,9 @@ def main():
     # Enumerate exact stale paths in this destination, never glob across run directories.
     stale = []
     prefix = subfolder + '/' if subfolder else ''
+    keep_card = args.keep_readme and prefix + 'README.md' in remote
+    if not args.keep_readme and not (folder / 'README.md').is_file():
+        raise ValueError('Cannot replace README: local README.md is missing')
     if args.overwrite:
         for remote_path in remote:
             if not remote_path.startswith(prefix):
@@ -54,12 +62,13 @@ def main():
             path = Path(relative)
             top_level = len(path.parts) == 1
             standard = (path.name.startswith('model') and (path.name.endswith('.safetensors') or path.name.endswith('.safetensors.index.json'))) or path.name.startswith('tokenizer') or path.name in ('special_tokens_map.json', 'added_tokens.json', 'generation_config.json') or path.suffix in ('.pt', '.pkl')
-            if (top_level and standard) or relative.startswith('assets/'):
+            if (top_level and standard) or (relative.startswith('assets/') and not keep_card):
                 stale.append(glob.escape(relative))
-    # The released card is hand-edited; later weight exports must not replace it.
     ignore = ['*.pt', '*.pkl']
-    if prefix + 'README.md' in remote:
-        ignore.append('README.md')
+    if keep_card:
+        ignore.extend(['README.md', 'assets/*', 'assets/**'])
+        kept_assets = [path for path in remote if path.startswith(prefix + 'assets/')]
+        print(f'Keeping remote {prefix}README.md and assets: {", ".join(kept_assets) or "(none)"}; skipping local README and assets')
     api.upload_folder(repo_id=args.repo_id, repo_type='model', folder_path=str(folder), path_in_repo=subfolder,
                       ignore_patterns=ignore, delete_patterns=stale or None)
 
