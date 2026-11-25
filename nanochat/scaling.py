@@ -44,11 +44,16 @@ def efficient_auto_batch(total_batch, sequence_len, world_size, limit):
     if total_batch % unit or count < 1 or limit < 1:
         raise ValueError("Invalid distributed batch")
     threshold = min(limit, count) / 2
+    best = (compatible_device_batch(total_batch, sequence_len, world_size, limit), count)
     for candidate in range(count, max(1, math.floor(.97 * count)) - 1, -1):
         device = compatible_device_batch(candidate * unit, sequence_len, world_size, limit)
+        if device > best[0]:
+            best = (device, candidate)
         if device >= threshold:
             return candidate * unit, device
-    return total_batch, compatible_device_batch(total_batch, sequence_len, world_size, limit)
+    # When no candidate reaches the preferred threshold, still use the best
+    # divisor within the same reduction bound instead of defaulting to one.
+    return best[1] * unit, best[0]
 
 
 def fit_local_isoflop(params, losses):

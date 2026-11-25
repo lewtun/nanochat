@@ -59,3 +59,10 @@ def test_efficient_batch_preserves_step_cap_and_avoids_small_microbatches(world_
         assert int(count * .97) * unit <= total <= count * unit
         assert total % (device * unit) == 0
         assert device >= min(32, count) / 2
+
+
+def test_efficient_batch_uses_best_fallback_when_no_large_divisor_exists():
+    unit = 2048 * 8
+    total, device = efficient_auto_batch(23 * unit, 2048, 8, 8)
+    assert total == 22 * unit
+    assert device == 2

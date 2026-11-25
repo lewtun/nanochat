@@ -46,6 +46,7 @@ parser.add_argument("--run", type=str, default="dummy", help="Trackio run name (
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--seed", type=int, default=42, help="model initialization seed")
+parser.add_argument("--feasibility-steps", type=int, default=0, help="stop after this many real optimizer steps for a memory check (0 disables)")
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
@@ -87,6 +88,10 @@ parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
+if args.feasibility_steps < 0:
+    parser.error("--feasibility-steps must be non-negative")
+if args.feasibility_steps and (args.resume_from_step >= 0 or args.target_flops <= 0 or args.num_iterations > 0):
+    parser.error("--feasibility-steps requires a fresh FLOP-budget run")
 if args.min_steps < 0:
     parser.error("--min-steps must be non-negative")
 if args.min_steps and (args.total_batch_size != -1 or args.target_flops <= 0 or args.num_iterations > 0):
@@ -407,6 +412,8 @@ else:
     raise ValueError("No training horizon specified")
 if num_iterations <= 0:
     raise ValueError("The training budget is too small for one optimizer step at this batch size")
+if args.feasibility_steps and args.feasibility_steps >= num_iterations:
+    raise ValueError("The feasibility check must stop before the training horizon")
 total_tokens = total_batch_size * num_iterations # the actual number of tokens we will train for
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
@@ -657,6 +664,14 @@ while True:
     # state update
     first_step_of_run = (step == 0) or (resuming and step == args.resume_from_step)
     step += 1
+    if args.feasibility_steps and step >= args.feasibility_steps:
+        if device_type == 'cuda':
+            peaks = torch.tensor([torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()], dtype=torch.int64, device=device)
+            if is_ddp_initialized():
+                torch.distributed.all_reduce(peaks, op=torch.distributed.ReduceOp.MAX)
+            print0(f"Feasibility peak across ranks: allocated={int(peaks[0])} reserved={int(peaks[1])} bytes")
+        print0(f"Feasibility check completed {step} optimizer steps; no checkpoint saved")
+        break
 
     # The garbage collector is sadly a little bit overactive and for some poorly understood reason,
     # it spends ~500ms scanning for cycles quite frequently, just to end up cleaning up very few tiny objects each time.
