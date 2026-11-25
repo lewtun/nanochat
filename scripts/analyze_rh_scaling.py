@@ -380,7 +380,7 @@ if args.diagnostics:
     if 'repeated_seed_comparison' in diagnostics:
         repeat_seed=diagnostics['repeated_seed_comparison']
         card += [f"Three paired seeds at {repeat_seed['budget']:.3g} FLOPs estimate {repeat_seed['noise_sigma_bpb']:.6f} BPB noise, also with fixed data order.", '']
-card += [f"The data-constrained seven-constant fit is {fits['data_constrained']['status']}; its constants should not be treated as identified if that status is unresolved. The source archive's license terms have not been established. All scaling rows were trained on H200 GPUs. Node sizes by compute budget:", '']
+card += [f"The data-constrained seven-constant fit is {fits['data_constrained']['status']}; its constants should not be treated as identified if that status is unresolved. All scaling rows were trained on H200 GPUs. Node sizes by compute budget:", '']
 for budget in sorted({row['flops_budget'] for row in rows}):
     counts = {row['nproc_per_node'] for row in rows if row['flops_budget'] == budget}
     sizes = ', '.join('unrecorded' if n is None else ('h200' if n == 1 else f'h200x{n}') for n in sorted(counts, key=lambda n: n or 0))

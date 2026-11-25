@@ -99,6 +99,8 @@ def test_convert_roundtrip(tmp_path):
     results = tmp_path / 'results.md'
     results.write_text('## Scaling-law results\n\n![isoFLOP](assets/isoflop.png)\n\n| N | D |\n|---|---|\n| 1 | 2 |\n')
     convert(ckpt, tokdir, out, results_markdown=results, assets_dir=plots)
+    assert 'license: apache-2.0' in (out / 'README.md').read_text()
+    assert 'license terms have not been established' not in (out / 'README.md').read_text()
     assert '![isoFLOP](assets/isoflop.png)' in (out / 'README.md').read_text()
     assert (out / 'assets/isoflop.png').read_bytes() == b'example plot'
     assert all((out / name).exists() for name in ("model.safetensors", "config.json", "generation_config.json", "tokenizer.json", "README.md"))
