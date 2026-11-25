@@ -30,10 +30,10 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     with path.open('w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        for budget_index, budget in enumerate([1e15, 1e16, 1e17, 1e18]):
+        for budget_index, budget in enumerate([1e15, 1e16, 4.64e16, 1e17, 1e18]):
             for depth in range(1, 8):
                 n = 1e6 * depth
-                loss = (depth - (4 if budget_index < 3 else 1)) ** 2 * .03 + .5
+                loss = (depth - (4 if budget < 1e18 else 1)) ** 2 * .03 + .5
                 if budget == 1e17 and depth == 5:
                     loss -= .05  # Measured minimum differs from the fitted vertex.
                 writer.writerow(dict(asset_prefix='rh', head_dim=64, document_eos=1, tokenizer_sha256='abc', tokenizer_bucket_path='bucket/tokenizer', batch_lr_scale=.3, weight_decay_scaled=.2, validation_mode='full_documents', model_dim=64*depth, depth=depth, num_iterations=500, nproc_per_node=1 if budget_index == 0 else 8, flops_budget=budget, effective_params=n, params_total=int(n)+1000, tokens_trained=1e7*(budget_index+1)/depth, text_tokens_trained=1e7, unique_tokens=1e7, passes=.1, repeat_factor=1, val_bpb=loss))
@@ -41,13 +41,13 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     env = os.environ.copy()
     subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output)], check=True, env=env, timeout=60)
     status = json.loads((output / 'budget_status.json').read_text())
-    assert [v['status'] for v in status.values()].count('valid') == 3
+    assert [v['status'] for v in status.values()].count('valid') == 4
     assert [v['status'] for v in status.values()].count('invalid') == 1
     fits = json.loads((output / 'fits.json').read_text())
-    assert fits['fresh']['n'] == 3
-    assert fits['all_budgets']['n'] == 3
+    assert fits['fresh']['n'] == 4
+    assert fits['all_budgets']['n'] == 4
     assert fits['headline']['n'] == 3
-    assert len(list(csv.DictReader((output / 'optimal_headline.csv').open()))) == 3
+    assert len(list(csv.DictReader((output / 'optimal_headline.csv').open()))) == 4
     assert 'mix fresh and repeated' in fits['all_budgets']['note']
     assert fits['data_constrained']['status'] != 'fit'
     selection = json.loads((output / 'selected_model.json').read_text())
@@ -58,6 +58,8 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     assert not selection['is_best_measured']
     assert selection['best_measured_depth'] == 5
     assert selection['fitted_optimum_params'] < 4.5e6
+    assert selection['prediction_fit_budgets'] == [1e15, 1e16, 4.64e16]
+    assert selection['predicted_optimum_params'] != pytest.approx(selection['fitted_optimum_params'])
     assert 'window_shift_fraction' in selection
     assert status[str(1e17)]['shifts_evaluated'] == 1
 
@@ -68,6 +70,21 @@ def test_synthetic_analysis_reports_valid_and_unbracketed_budgets(tmp_path):
     assert '1e+16 FLOPs: h200x8' in card
     assert card.count('![') == 1 and 'assets/scaling.png' in card
     assert (output / 'plots/scaling.png').exists()
+    # Alter the held-out target curve: prediction and choice must not use its fitted optimum.
+    with path.open() as f:
+        original_records = list(csv.DictReader(f))
+    altered = [r.copy() for r in original_records]
+    for r in altered:
+        if float(r['flops_budget']) == 1e17 and int(r['depth']) == 5:
+            r['val_bpb'] = .43
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields); writer.writeheader(); writer.writerows(altered)
+    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output)], check=True, env=env, timeout=60)
+    held_out = json.loads((output / 'selected_model.json').read_text())
+    assert held_out['predicted_optimum_params'] == pytest.approx(selection['predicted_optimum_params'])
+    assert held_out['depth'] == selection['depth']
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields); writer.writeheader(); writer.writerows(original_records)
     duplicate = subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), str(path), '--output-dir', str(output)], capture_output=True, text=True, timeout=60)
     assert duplicate.returncode != 0
     assert 'Duplicate budget/depth' in duplicate.stderr
@@ -119,7 +136,7 @@ def test_recovers_identifiable_data_constrained_law(tmp_path):
                 loss = A/ne**alpha+B/de**beta+E
                 writer.writerow(dict(asset_prefix='rh', head_dim=64, document_eos=1, tokenizer_sha256='abc', tokenizer_bucket_path='bucket/tokenizer', batch_lr_scale=.3, weight_decay_scaled=.2, validation_mode='full_documents', model_dim=64*depth, depth=depth, num_iterations=500, flops_budget=compute, effective_params=n, tokens_trained=d, text_tokens_trained=d, unique_tokens=u, passes=d/100e6, repeat_factor=d/u, val_bpb=loss))
     output = tmp_path / 'output'
-    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output)], check=True, timeout=60)
+    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output), '--headline-max-flops', '1e18'], check=True, timeout=60)
     result = json.loads((output / 'fits.json').read_text())['data_constrained']
     assert result['status'] == 'fit'
     assert result['parameters'] == pytest.approx({'A': 3, 'B': 2, 'alpha': .4, 'beta': .3, 'E': .2, 'R_D_star': 3, 'R_N_star': 5}, rel=1e-4)
@@ -146,6 +163,6 @@ def test_recovers_identifiable_data_constrained_law(tmp_path):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(records)
-    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output)], check=True, timeout=60)
+    subprocess.run([sys.executable, '-m', 'scripts.analyze_rh_scaling', '--manifest', str(manifest_path), '--results', str(path), '--output-dir', str(output), '--headline-max-flops', '1e18'], check=True, timeout=60)
     result = json.loads((output / 'fits.json').read_text())['data_constrained']
     assert result['status'] == 'unidentified'

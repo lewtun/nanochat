@@ -172,42 +172,54 @@ if not optimal:
 with (args.output_dir/'optimal.csv').open('w',newline='') as f:
     writer = csv.DictWriter(f,fieldnames=list(optimal[0])); writer.writeheader(); writer.writerows(optimal)
 headline = [r for r in optimal if r['flops'] <= args.headline_max_flops]
-if not headline:
-    raise SystemExit('No valid headline budget fits; see budget_status.json and extend the depth grid')
-largest = max(headline, key=lambda r: r['flops'])
-budget_rows = [r for r in rows if r['flops_budget'] == largest['flops']]
-selected = min(budget_rows, key=lambda r: (abs(np.log(r['effective_params'] / largest['effective_params'])), r['effective_params']))
+target_budgets = [r['flops_budget'] for r in rows if r['flops_budget'] <= args.headline_max_flops]
+if not target_budgets:
+    raise SystemExit('No headline target budget is available')
+target_budget = max(target_budgets)
+prediction_train = [r for r in headline if r['flops'] < target_budget]
+if len(prediction_train) < 3:
+    raise SystemExit('At least three valid lower headline budgets are required for the held-out prediction')
+prediction_coef = np.polyfit(np.log10([r['flops'] for r in prediction_train]), np.log10([r['effective_params'] for r in prediction_train]), 1)
+predicted_params = float(10 ** np.polyval(prediction_coef, np.log10(target_budget)))
+target_fit = next((r for r in headline if r['flops'] == target_budget), None)
+budget_rows = [r for r in rows if r['flops_budget'] == target_budget]
+selected = min(budget_rows, key=lambda r: (abs(np.log(r['effective_params'] / predicted_params)), r['effective_params']))
 best_measured = min(budget_rows, key=lambda r: (r['val_bpb'], r['effective_params']))
-selection = {'budget': largest['flops'], 'depth': selected['depth'], 'run_name': selected['run_name'],
+selection = {'budget': target_budget, 'depth': selected['depth'], 'run_name': selected['run_name'],
              'effective_params': selected['effective_params'], 'params_total': selected['params_total'],
-             'fitted_optimum_params': largest['effective_params'],
-             'window_shift_fraction': largest['window_shift_fraction'],
-             'window_sensitive': budget_status[str(largest['flops'])]['sensitive'],
-             'window_shift_invalid': budget_status[str(largest['flops'])]['invalid_shift'],
+             'predicted_optimum_params': predicted_params,
+             'prediction_offset_fraction': selected['effective_params'] / predicted_params - 1,
+             'prediction_fit_exponent': float(prediction_coef[0]),
+             'prediction_fit_budgets': [r['flops'] for r in prediction_train],
+             'fitted_optimum_params': target_fit['effective_params'] if target_fit else None,
+             'window_shift_fraction': target_fit['window_shift_fraction'] if target_fit else None,
+             'window_sensitive': budget_status[str(target_budget)].get('sensitive'),
+             'window_shift_invalid': budget_status[str(target_budget)].get('invalid_shift'),
              'final_validation_bpb': selected['val_bpb'],
              'passes': selected['passes'],
              'is_best_measured': selected['val_bpb'] == best_measured['val_bpb'],
              'best_measured_depth': best_measured['depth'],
              'best_measured_bpb': best_measured['val_bpb'],
-             'selection_rule': 'tested checkpoint nearest the fitted optimum at the largest valid headline budget'}
+             'bpb_above_best_measured': selected['val_bpb'] - best_measured['val_bpb'],
+             'selection_rule': 'fit on headline budgets below the target, predict the target budget optimum, and select the tested depth nearest the prediction'}
 (args.output_dir/'selected_model.json').write_text(json.dumps(selection, indent=2) + '\n')
 fits = {}
 for filename, group in [('optimal_headline.csv', headline), ('optimal_beyond.csv', [r for r in optimal if r['flops'] > args.headline_max_flops])]:
     if group:
         with (args.output_dir/filename).open('w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=list(group[0])); writer.writeheader(); writer.writerows(group)
-if len(headline) >= 3:
-    hx = np.log10([r['flops'] for r in headline])
-    ncoef = np.polyfit(hx, np.log10([r['effective_params'] for r in headline]), 1)
-    dcoef = np.polyfit(hx, np.log10([r['tokens'] for r in headline]), 1)
-    headline_fit = {'n': len(headline), 'params_exponent': float(ncoef[0]), 'params_coefficient': float(10**ncoef[1]), 'tokens_exponent': float(dcoef[0]), 'tokens_coefficient': float(10**dcoef[1])}
-    success_fraction = float(np.prod([len(bootstrap_optima[r['flops']])/500 for r in headline]))
+if len(prediction_train) >= 3:
+    hx = np.log10([r['flops'] for r in prediction_train])
+    ncoef = prediction_coef
+    dcoef = np.polyfit(hx, np.log10([r['tokens'] for r in prediction_train]), 1)
+    headline_fit = {'n': len(prediction_train), 'held_out_target_budget': target_budget, 'params_exponent': float(ncoef[0]), 'params_coefficient': float(10**ncoef[1]), 'tokens_exponent': float(dcoef[0]), 'tokens_coefficient': float(10**dcoef[1])}
+    success_fraction = float(np.prod([len(bootstrap_optima[r['flops']])/500 for r in prediction_train]))
     headline_fit['joint_valid_fit_fraction'] = success_fraction
-    if all(len(bootstrap_optima[r['flops']]) >= 100 for r in headline):
+    if all(len(bootstrap_optima[r['flops']]) >= 100 for r in prediction_train):
         rng = np.random.default_rng(104)
         slopes = []
         for _ in range(500):
-            draw = np.array([samples[rng.integers(len(samples))] for r in headline for samples in [bootstrap_optima[r['flops']]]])
+            draw = np.array([samples[rng.integers(len(samples))] for r in prediction_train for samples in [bootstrap_optima[r['flops']]]])
             slopes.append([np.polyfit(hx, np.log10(draw[:,0]), 1)[0], np.polyfit(hx, np.log10(draw[:,1]), 1)[0]])
         intervals = np.percentile(slopes, [2.5, 97.5], axis=0)
         headline_fit['conditional_params_exponent_ci'] = intervals[:,0].tolist()
@@ -321,8 +333,8 @@ ax.set(xscale='log', xlabel='Effective parameters', ylabel='Final validation bit
 ax.legend(fontsize=7, loc='upper right')
 if headline:
     hx = np.array([r['flops'] for r in headline]); hy = np.array([r['effective_params'] for r in headline])
-    # The selected model replaces the regular marker at its budget; the fit
-    # below still uses every headline optimum, including that budget.
+    # The target is held out of the power-law fit; its selected model replaces
+    # the regular marker at that budget.
     marker_mask = hx != selected['flops_budget']
     nx.loglog(hx[marker_mask], hy[marker_mask], 'o', color='#2878b5', label='Fitted optima')
     fit = fits.get('headline', {})
@@ -341,7 +353,7 @@ card = ['## Scaling-law results', '', f'The headline sweep covers {headline_rang
 hf = fits.get('headline', {})
 if 'params_exponent' in hf:
     ni, di = hf.get('conditional_params_exponent_ci'), hf.get('conditional_tokens_exponent_ci')
-    card += [f"Across these {len(headline)} budgets, N ∝ C^{hf['params_exponent']:.3f} and D ∝ C^{hf['tokens_exponent']:.3f}.", '']
+    card += [f"Fitting the {len(prediction_train)} headline budgets below {target_budget:.3g} FLOPs gives N ∝ C^{hf['params_exponent']:.3f} and D ∝ C^{hf['tokens_exponent']:.3f}; the target budget is held out.", '']
     if ni and di:
         card += [f"Noise-only bootstrap 95% intervals conditional on valid fits are [{ni[0]:.3f}, {ni[1]:.3f}] for N and [{di[0]:.3f}, {di[1]:.3f}] for D. Approximately {100*hf['joint_valid_fit_fraction']:.1f}% of joint draws yield valid fits under the independent-budget assumption; unconditional intervals are {hf['unconditional_ci_status']}. These conditional intervals exclude fitting-window and scaling-model uncertainty.", '']
 card += ['| FLOPs | Effective parameters (noise-only 95% CI) | Training tokens | Tokens/parameter (noise-only 95% CI) | Fitted BPB | Best measured BPB | Passes |', '| ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
@@ -353,7 +365,7 @@ if args.diagnostics:
     diagnostics = json.loads(args.diagnostics.read_text())
 total_text = f" and {selection['params_total']:,} total parameters" if selection['params_total'] is not None else ''
 best_text = ' It is also the best-measured run at that budget.' if selection['is_best_measured'] else f" The best-measured run at that budget is depth {selection['best_measured_depth']} (BPB {selection['best_measured_bpb']:.6f})."
-card += ['', f"riemann-nano is depth {selection['depth']}, the tested checkpoint nearest the fitted optimum at the largest headline budget ({selection['budget']:.3g} FLOPs). It has {selection['effective_params']:,.0f} effective parameters{total_text}, was trained for {selection['passes']:.2f} passes, and achieved final matched-validation BPB {selection['final_validation_bpb']:.6f}.{best_text} The fitted optimum is {selection['fitted_optimum_params']:,.0f} effective parameters; shifting the fitting window changes it by up to {100*selection['window_shift_fraction']:.1f}%.", '', '## Limitations', '']
+card += ['', f"riemann-nano is depth {selection['depth']}, the tested checkpoint nearest the predicted optimum at the held-out headline budget ({selection['budget']:.3g} FLOPs). It has {selection['effective_params']:,.0f} effective parameters{total_text}, was trained for {selection['passes']:.2f} passes, and achieved final matched-validation BPB {selection['final_validation_bpb']:.6f}.{best_text} The predicted optimum is {selection['predicted_optimum_params']:,.0f} effective parameters; the selected model is {100*abs(selection['prediction_offset_fraction']):.1f}% from that prediction.", '', '## Limitations', '']
 if any(r['flops'] > args.headline_max_flops for r in optimal):
     card += ['Larger budgets (1e18–3e18 FLOPs) were also explored; the corpus repeats and their optima depart from the headline scaling law. Those runs are not part of this release.', '']
 if manifest.get('train') and manifest.get('validation'):
